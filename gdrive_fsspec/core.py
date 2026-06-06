@@ -103,7 +103,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             in the json file.
         :param auth_kwargs: dict
             Additional keyword arguments to pass to the authentication method.
-            Currently only used for the "cache" and "browser" methods.
         :param kwargs:
             Passed to parent
         """
@@ -165,7 +164,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             creds = self.creds
         return service_account.Credentials.from_service_account_info(
-            info=creds, scopes=self.scopes
+            info=creds, scopes=self.scopes, **self.auth_kwargs
         )
 
     @cached_property
