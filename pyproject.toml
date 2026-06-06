@@ -64,7 +64,7 @@ extend-select = ["I"]
 [tool.pytest.ini_options]
 addopts = """\
     --strict-markers \
-    -m "not (integration) and not (packaging)"
+    -m "not integration and not packaging"
     """
 
 markers = [

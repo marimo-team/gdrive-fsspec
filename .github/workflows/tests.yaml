@@ -23,16 +23,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install latest uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --all-groups --frozen
+      - uses: ./.github/actions/setup
 
       - name: Run prek
-        run: uv run prek run --all-files
+        run: uv run prek run --all-files --skip pyrefly-check
 
   typecheck:
     name: Type check
@@ -43,20 +37,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install latest uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: ./.github/actions/setup
         with:
           python-version: "3.13"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --all-groups --frozen
 
       - name: Run pyrefly
         run: uv run pyrefly check --output-format=github
 
-  build:
-    name: Build
+  packaging:
+    name: Packaging
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -64,14 +53,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install latest uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: ./.github/actions/setup
         with:
           python-version: "3.13"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --all-groups --frozen
 
       - name: Run packaging tests
         run: uv run pytest -v -m packaging
@@ -90,14 +74,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install latest uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: ./.github/actions/setup
         with:
           python-version: ${{ matrix.python-version }}
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --all-groups --frozen
 
       - name: Run unit tests
         run: uv run pytest -v
@@ -120,14 +99,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install latest uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: ./.github/actions/setup
         with:
           python-version: "3.13"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --all-groups --frozen
 
       - name: Run integration tests
         env:
