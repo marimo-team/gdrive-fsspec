@@ -95,6 +95,7 @@ uv run prek install
 uv run prek run --all-files
 ```
 in the repo (once) before committing. This runs ruff, codespell, and pyrefly.
+CI also runs pyrefly separately with GitHub PR annotations.
 
 ## Other implementations
 

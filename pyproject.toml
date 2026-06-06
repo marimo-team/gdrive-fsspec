@@ -8,14 +8,14 @@ dynamic = ["version"]
 description = "File system on GDrive"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 maintainers = [
     {name = "Martin Durant", email = "martin.durant@alumni.utoronto.ca"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -46,8 +46,7 @@ Source = "http://github.com/fsspec/gdrive-fsspec"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["gdrive_fsspec*"]
-exclude = ["gdrive_fsspec.tests*"]
+include = ["gdrive_fsspec"]
 
 [tool.setuptools_scm]
 version_file = "gdrive_fsspec/_version.py"
@@ -65,11 +64,12 @@ extend-select = ["I"]
 [tool.pytest.ini_options]
 addopts = """\
     --strict-markers \
-    -m "not (integration)"
+    -m "not (integration) and not (packaging)"
     """
 
 markers = [
     "integration: marks test as integration test consuming external resources (select with '-m integration')",
+    "packaging: marks packaging tests that build distributions (select with '-m packaging')",
 ]
 
 [tool.pyrefly]
