@@ -90,7 +90,7 @@ For a personal Drive (no Shared Drive), run tests with user OAuth instead: `GDRI
 All tests use a directory named `gdrive_fsspec_testdir`.
 
 ```sh
-pip install -e . pytest
+uv sync
 pytest -v -m ""
 ```
 
