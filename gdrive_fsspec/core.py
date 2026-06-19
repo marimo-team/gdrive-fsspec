@@ -143,9 +143,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @property
     def _user_credentials_cache_path(self):
-        import pydata_google_auth
+        from pydata_google_auth import cache
 
-        return pydata_google_auth.cache.READ_WRITE._path
+        return cache.READ_WRITE._path
 
     def _connect_browser(self):
         try:
@@ -180,6 +180,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         out = []
         page_token = None
         while True:
+            # pyrefly: ignore [bad-argument-type]
             ret = self.srv.drives().list(pageToken=page_token).execute()
             out.extend(ret["drives"])
             page_token = ret.get("nextPageToken")
@@ -187,6 +188,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 break
         return out
 
+    # pyrefly: ignore [bad-override]
     def mkdir(self, path, create_parents=True, **kwargs):
         if create_parents and self._parent(path):
             self.makedirs(self._parent(path), exist_ok=True)
@@ -200,6 +202,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if self.exists(path):
             raise FileExistsError(path)
         logger.debug(f"Creating {path}, child of {parent_id}")
+        # pyrefly: ignore [bad-argument-type]
         out = self.files.create(body=meta, supportsAllDrives=True).execute()
         if par in self.dircache:
             self.dircache[par].append(_finfo_from_response(out, path_prefix=par))
@@ -216,9 +219,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             elif i == len(parts) - 1 and not exist_ok:
                 raise FileExistsError(path)
 
+    # pyrefly: ignore [bad-override]
     def rm_file(self, path, file_id=None):
         file_id = file_id or self.info(path)["id"]
         logger.debug(f"Removing {path}, file_id={file_id}")
+        # pyrefly: ignore [bad-argument-type]
         self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
         par = self._parent(path)
         if par in self.dircache:
@@ -242,6 +247,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         mime_type is something like "text/plain"
         """
+        # pyrefly: ignore [missing-attribute]
         file_id = self.path_to_file_id(path)
         return self.files.export(
             fileId=file_id, mimeType=mime_type, supportsAllDrives=True
@@ -256,6 +262,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             raise ValueError(f"Drive name {drive} refers to multiple shared drives")
 
+    # pyrefly: ignore [bad-override]
     def ls(self, path, detail=False, trashed=False):
         path = self._strip_protocol(path)
         files = self._ls_from_cache(path)
@@ -263,6 +270,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if files is None:
             # get parent ID
             if "/" in path:
+                # pyrefly: ignore [missing-attribute]
                 pref = path.rsplit("/", 1)[0]
                 inf = self.info(pref, trashed=trashed)
                 file_id = inf["id"]
@@ -297,6 +305,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             return sorted([f["name"] for f in files])
 
+    # pyrefly: ignore [bad-override]
     def info(self, path, trashed=False):
         path = self._strip_protocol(path)
         if path == "":
@@ -337,9 +346,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 q=query,
                 spaces=self.spaces,
                 fields=afields,
+                # pyrefly: ignore [bad-argument-type]
                 pageToken=page_token,
                 orderBy="name",
                 pageSize=1000,
+                # pyrefly: ignore [bad-argument-type]
                 **kwargs,
             ).execute()
             for f in response.get("files", []):
@@ -349,6 +360,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 break
         return all_files
 
+    # pyrefly: ignore [bad-override]
     def _open(self, path, mode="rb", **kwargs):
         return GoogleDriveFile(self, path, mode=mode, **kwargs)
 
@@ -411,6 +423,7 @@ class GoogleDriveFile(AbstractBufferedFile):
                 return b""
             raise
 
+    # pyrefly: ignore [bad-override]
     def _upload_chunk(self, final=False):
         """Write one part of a multi-block file upload
 
@@ -425,7 +438,9 @@ class GoogleDriveFile(AbstractBufferedFile):
         length = len(data)
         if final and self.autocommit:
             if length:
+                # pyrefly: ignore [unsupported-operation]
                 part = "%i-%i" % (self.offset, self.offset + length - 1)
+                # pyrefly: ignore [unsupported-operation]
                 head["Content-Range"] = "bytes %s/%i" % (part, self.offset + length)
             else:
                 # closing when buffer is empty
@@ -434,6 +449,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         else:
             head["Content-Range"] = "bytes %i-%i/*" % (
                 self.offset,
+                # pyrefly: ignore [unsupported-operation]
                 self.offset + length - 1,
             )
         head.update(
@@ -441,6 +457,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         )
         req = self.fs.files._http.request
         head, body = req(
+            # pyrefly: ignore [unsupported-operation]
             self.location + "&supportsAllDrives=true",
             method="PUT",
             body=data,

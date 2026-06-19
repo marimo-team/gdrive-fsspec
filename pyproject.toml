@@ -35,6 +35,8 @@ dependencies = [
 dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.16",
+    "pyrefly>=1.0.0",
+    "google-api-python-client-stubs>=1.37.0",
 ]
 
 [project.urls]
@@ -54,4 +56,10 @@ addopts = """\
 
 markers = [
     "integration: marks test as integration test consuming external resources (select with '-m integration')",
+]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
 ]

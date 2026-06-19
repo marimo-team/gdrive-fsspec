@@ -26,7 +26,23 @@ jobs:
       - uses: ./.github/actions/setup
 
       - name: Run pre-commit
-        run: uvx pre-commit run --all-files
+        run: SKIP=pyrefly-check uvx pre-commit run --all-files
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+
+      - name: Run pyrefly
+        run: uv run pyrefly check --output-format=github
 
   test:
     name: Test (Python ${{ matrix.python-version }})

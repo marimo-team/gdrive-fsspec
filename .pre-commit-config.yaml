@@ -23,3 +23,10 @@ repos:
     rev: v2.4.2
     hooks:
       - id: codespell
+  - repo: https://github.com/facebook/pyrefly-pre-commit
+    rev: 1.1.0.dev1
+    hooks:
+      - id: pyrefly-check
+        name: Pyrefly (type checking)
+        pass_filenames: false
+        language: system
