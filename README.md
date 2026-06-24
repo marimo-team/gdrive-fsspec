@@ -134,7 +134,7 @@ uv run pytest -v -m ""
 
 > **Note:** Integration tests do not run on PRs from forks, because those
 > workflows cannot use repository secrets. They run on pushes to `master` and same repo PRs.
-> Google Drive has no good emulator; see [issue #125](https://github.com/fsspec/gdrive-fsspec/issues/125).
+> Google Drive has no good emulator; see [link](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
 
 ## Other implementations
 
