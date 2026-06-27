@@ -5,18 +5,15 @@
 </p>
 
 <p align="center">
-  <em>Use Google Drive as an fsspec filesystem</em>
-</p>
-
-<p align="center">
-  <a href="https://github.com/fsspec/gdrive-fsspec/actions/workflows/ci.yaml"><img src="https://github.com/fsspec/gdrive-fsspec/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Light2Dark/gdrive-fsspec/actions/workflows/ci.yaml"><img src="https://github.com/Light2Dark/gdrive-fsspec/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/v/gdrive-fsspec.svg" alt="PyPI"></a>
   <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/pyversions/gdrive-fsspec.svg" alt="Python versions"></a>
-  <a href="https://github.com/fsspec/gdrive-fsspec/blob/master/LICENSE"><img src="https://img.shields.io/github/license/fsspec/gdrive-fsspec.svg" alt="license"></a>
+  <a href="https://github.com/Light2Dark/gdrive-fsspec/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Light2Dark/gdrive-fsspec.svg" alt="license"></a>
 </p>
 
 <p align="center">
   <a href="https://filesystem-spec.readthedocs.io/en/latest/usage.html"><strong>fsspec docs</strong></a> ·
+  <a href="https://github.com/Light2Dark/gdrive-fsspec/blob/master/CONTRIBUTING.md"><strong>contributing</strong></a>
 </p>
 
 ---
