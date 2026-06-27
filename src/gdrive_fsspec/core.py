@@ -16,12 +16,19 @@ from .typing_utils import override
 
 DEFAULT_BLOCK_SIZE = 5 * 2**20
 LOGGER = logging.getLogger("gdrive_fsspec")
+
+# https://developers.google.com/workspace/drive/api/guides/api-specific-auth
 SCOPE_DICT = {
     "full_control": "https://www.googleapis.com/auth/drive",
     "read_only": "https://www.googleapis.com/auth/drive.readonly",
 }
 
+# https://developers.google.com/workspace/drive/api/guides/mime-types
 DIR_MIME_TYPE = "application/vnd.google-apps.folder"
+
+# File resource fields; partial-response mask for files.list / files.get:
+# https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource
+# https://developers.google.com/workspace/drive/api/guides/performance#partial
 FIELDS = ",".join(
     [
         "name",

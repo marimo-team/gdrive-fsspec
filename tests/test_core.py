@@ -1,9 +1,9 @@
 import json
-import os
-from typing import Any, Generator, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 from unittest import mock
 
 import pytest
+from conftest import TESTDIR, FsFactory
 from googleapiclient.errors import HttpError
 
 from gdrive_fsspec.core import (
@@ -13,50 +13,6 @@ from gdrive_fsspec.core import (
     _finfo_from_response,
     _normalize_path,
 )
-
-TESTDIR = "gdrive_fsspec_testdir"
-
-
-def _credentials_configured() -> bool:
-    token = os.getenv("GDRIVE_FSSPEC_CREDENTIALS_TYPE", "service_account")
-    if token == "service_account":
-        path = os.getenv("GDRIVE_FSSPEC_CREDENTIALS_PATH")
-        return bool(path and path.strip())
-    return True
-
-
-@pytest.fixture()
-def fs() -> Generator[GoogleDriveFileSystem, None, None]:
-    if not _credentials_configured():
-        pytest.skip("GDRIVE_FSSPEC_CREDENTIALS_PATH not set")
-    creds_path = os.getenv("GDRIVE_FSSPEC_CREDENTIALS_PATH")
-
-    token = os.getenv("GDRIVE_FSSPEC_CREDENTIALS_TYPE", "service_account")
-    if isinstance(token, str) and token not in [
-        "anon",
-        "browser",
-        "cache",
-        "service_account",
-    ]:
-        raise ValueError(f"Invalid token: {token}")
-
-    fs = GoogleDriveFileSystem(
-        skip_instance_cache=True,
-        creds=creds_path,
-        token=token,
-        drive=os.getenv("GDRIVE_FSSPEC_DRIVE"),
-    )
-    if fs.exists(TESTDIR):
-        fs.rm(TESTDIR, recursive=True)
-    fs.mkdir(TESTDIR, create_parents=True)
-    try:
-        yield fs
-    finally:
-        try:
-            fs.rm(TESTDIR, recursive=True)
-        except IOError:
-            pass
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -393,6 +349,38 @@ def test_service_account_empty_creds_raises(creds: str) -> None:
 # ---------------------------------------------------------------------------
 # Integration (require live Google Drive credentials)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_root_file_id_rejects_file(
+    fs: GoogleDriveFileSystem, make_fs: FsFactory
+) -> None:
+    """A regular file ID must not be accepted as the filesystem root."""
+    fn = TESTDIR + "/root_is_a_file"
+    with fs.open(fn, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"x")
+    file_id = fs.info(fn)["id"]
+
+    with pytest.raises(NotADirectoryError):
+        make_fs(root_file_id=file_id)
+
+
+@pytest.mark.integration
+def test_root_file_id_accepts_folder(
+    fs: GoogleDriveFileSystem, make_fs: FsFactory
+) -> None:
+    """A folder ID is a valid root and lists its children from ``ls("")``."""
+    folder = TESTDIR + "/root_folder"
+    fs.mkdir(folder)
+    with fs.open(folder + "/child", "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"data")
+    folder_id = fs.info(folder)["id"]
+
+    rooted = make_fs(root_file_id=folder_id)
+    names = [item["name"] for item in rooted.ls("", detail=True)]
+    assert "child" in names
 
 
 @pytest.mark.integration

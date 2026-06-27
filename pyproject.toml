@@ -64,6 +64,7 @@ extend-select = ["I", "B"]
 [tool.pyrefly]
 preset = "strict"
 project-includes = ["**/*.py*"]
+search-path = ["tests"]
 
 [tool.pyrefly.errors]
 unannotated-return = "error"
