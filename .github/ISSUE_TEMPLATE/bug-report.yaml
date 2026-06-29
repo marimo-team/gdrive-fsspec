@@ -1,4 +1,4 @@
-name: 🐛 gdrive_fsspec Bug
+name: 🐛 Bug report
 description: Report a bug or unexpected behavior in gdrive_fsspec
 labels: ["bug"]
 body:
