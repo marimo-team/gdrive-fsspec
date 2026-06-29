@@ -70,7 +70,7 @@ def test_upload_chunk_without_parent_dircache() -> None:
     file.offset = 0
 
     try:
-        file._upload_chunk(final=True)
+        assert file._upload_chunk(final=True) is None
     finally:
         file.closed = True
 

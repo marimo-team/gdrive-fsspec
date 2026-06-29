@@ -308,6 +308,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         return drives
 
     def _path_str(self, path: PathLike) -> str:
+        """Strip the protocol and normalize a path-like input to a single string.
+
+        Args:
+            path: A ``str``, ``os.PathLike``, or ``pathlib.Path``.
+
+        Returns:
+            The protocol-stripped path as a string.
+
+        Raises:
+            TypeError: If ``path`` resolves to a sequence of paths.
+        """
         stripped = self._strip_protocol(path)
         if isinstance(stripped, list):
             raise TypeError("expected a single path, not a sequence of paths")
@@ -377,15 +388,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             path: Path of the file or folder to delete.
             file_id: Optional Drive file ID; if omitted, resolved from ``path``.
         """
-        file_id = file_id or self.info(path)["id"]
-        LOGGER.debug(f"Removing {path}, file_id={file_id}")
+        stripped_path = self._path_str(path)
+        file_id = file_id or self.info(stripped_path)["id"]
+        LOGGER.debug(f"Removing {stripped_path}, file_id={file_id}")
         self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
-        par = self._parent(path)
-        if par in self.dircache:
-            listing = self.dircache[par]
-            i = [i for i, li in enumerate(listing) if li["name"] == path][0]
+        parent = self._parent(stripped_path)
+        if parent in self.dircache:
+            listing = self.dircache[parent]
+            i = [i for i, li in enumerate(listing) if li["name"] == stripped_path][0]
             listing.pop(i)
-        self.dircache.pop(path, None)
+        self.dircache.pop(stripped_path, None)
 
     @override
     def rm(
@@ -649,6 +661,19 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         cache_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AbstractBufferedFile:
+        """Open a file on Google Drive, returning a buffered file object.
+
+        Args:
+            path: Path of the file to open.
+            mode: File mode; only ``"rb"`` and ``"wb"`` are supported.
+            block_size: Buffer size in bytes; defaults to ``DEFAULT_BLOCK_SIZE``.
+            autocommit: If True, commit the upload when the file is closed.
+            cache_options: Options forwarded to the read-ahead cache.
+            **kwargs: Passed to :class:`GoogleDriveFile`.
+
+        Returns:
+            A :class:`GoogleDriveFile` open in the requested mode.
+        """
         return GoogleDriveFile(
             self,
             path,
@@ -680,6 +705,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             autocommit: If True, commit the upload when the file is closed.
             **kwargs: Passed to :class:`AbstractBufferedFile`.
         """
+        path = fs._path_str(path)
         super().__init__(fs, path, mode, block_size, autocommit=autocommit, **kwargs)
 
         if mode == "wb":
@@ -726,8 +752,8 @@ class GoogleDriveFile(AbstractBufferedFile):
         Args:
             final: If True, finalize and commit the upload.
 
-        Returns:
-            True when the chunk was uploaded successfully.
+        Raises:
+            IOError: If the upload server returns an unexpected response.
         """
         self.buffer.seek(0)
         data = self.buffer.getvalue()

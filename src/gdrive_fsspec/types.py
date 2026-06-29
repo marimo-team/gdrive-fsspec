@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 
 class _FsspecRequired(TypedDict):
+    """Fields fsspec requires on every file-info dict."""
+
     name: str
     size: int
     type: Literal["file", "directory"]
