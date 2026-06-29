@@ -2,6 +2,7 @@
 
 import io
 import json
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -33,11 +34,11 @@ def _write_file(
     """
     parent = fs._parent(path)
 
-    def _info(p: str, *args: object, **kwargs: object) -> dict[str, str]:
+    def _info(p: str, *args: object, **kwargs: object) -> dict[str, Any]:
         if fs._strip_protocol(p) == parent:
-            return {"id": parent_id}
+            return {"id": parent_id, "type": "directory"}
         if existing_id is not None:
-            return {"id": existing_id}
+            return {"id": existing_id, "type": "file"}
         raise FileNotFoundError(p)
 
     fs.info = mock.Mock(side_effect=_info)
@@ -172,6 +173,18 @@ def test_open_wb_propagates_multiple_files_error(mocked_fs: MockedDriveFS) -> No
 
     with pytest.raises(MultipleFilesError):
         GoogleDriveFile(fs, "parent/file.txt", mode="wb")
+
+
+def test_open_wb_on_directory_raises(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # Opening an existing directory for writing must not resolve its id as an
+    # overwrite target; bytes cannot be PATCHed onto a folder.
+    fs.info = mock.Mock(
+        return_value={"id": "dir-id", "type": "directory", "name": "parent/sub"}
+    )
+
+    with pytest.raises(IsADirectoryError):
+        GoogleDriveFile(fs, "parent/sub", mode="wb")
 
 
 def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:

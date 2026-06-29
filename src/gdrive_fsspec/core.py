@@ -739,6 +739,11 @@ class GoogleDriveFile(AbstractBufferedFile):
             block_size: Buffer size for reading or writing (default 5 MiB).
             autocommit: If True, commit the upload when the file is closed.
             **kwargs: Passed to :class:`AbstractBufferedFile`.
+
+        Raises:
+            IsADirectoryError: If ``mode`` is ``"wb"`` and ``path`` is an
+                existing directory.
+            MultipleFilesError: If ``path`` already resolves to multiple files.
         """
         path = fs._path_str(path)
 
@@ -748,11 +753,15 @@ class GoogleDriveFile(AbstractBufferedFile):
             # the existing file instead of creating an identically-named
             # duplicate.
             try:
-                existing_id = fs.info(path)["id"]
+                existing: FileInfo = cast(FileInfo, fs.info(path))
             except MultipleFilesError:
                 raise
             except FileNotFoundError:
                 pass
+            else:
+                if existing["type"] == "directory":
+                    raise IsADirectoryError(path)
+                existing_id = existing["id"]
 
         super().__init__(fs, path, mode, block_size, autocommit=autocommit, **kwargs)
 
