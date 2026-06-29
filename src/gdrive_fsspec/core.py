@@ -1,10 +1,11 @@
 import json
 import logging
 import os
+import pathlib
 import re
 import warnings
 from functools import cached_property
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, TypeAlias
 
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials, Credentials
@@ -49,7 +50,7 @@ def _normalize_path(prefix: str, name: str) -> str:
 
 
 def _finfo_from_response(
-    f: dict[str, Any], path_prefix: str | None = None
+    f: Mapping[str, Any], path_prefix: str | None = None
 ) -> dict[str, Any]:
     # strictly speaking, other types might be capable of having children,
     # such as packages
@@ -60,8 +61,7 @@ def _finfo_from_response(
     else:
         name = f["name"]
     info = {"name": name.lstrip("/"), "size": int(f.get("size", 0)), "type": ftype}
-    f.update(info)
-    return f
+    return {**f, **info}
 
 
 class MultipleFilesError(FileNotFoundError):
@@ -70,6 +70,9 @@ class MultipleFilesError(FileNotFoundError):
 
 AuthMethod = Literal["anon", "browser", "cache", "service_account"]
 ROOT_ID = "root"
+
+# One path element — matches fsspec.stringify_path
+PathLike: TypeAlias = str | os.PathLike[str] | pathlib.Path
 
 
 class GoogleDriveFileSystem(AbstractFileSystem):
@@ -275,18 +278,26 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             List of drive resource dicts from the Drive API.
         """
         out: list[Any] = []
-        page_token = None
+        page_token: str | None = None
         while True:
-            # pyrefly: ignore [bad-argument-type]
-            ret = self.service.drives().list(pageToken=page_token).execute()
+            if page_token is None:
+                ret = self.service.drives().list().execute()
+            else:
+                ret = self.service.drives().list(pageToken=page_token).execute()
             out.extend(ret["drives"])
             page_token = ret.get("nextPageToken")
             if page_token is None:
                 break
         return out
 
+    def _path_str(self, path: PathLike) -> str:
+        stripped = self._strip_protocol(path)
+        if isinstance(stripped, list):
+            raise TypeError("expected a single path, not a sequence of paths")
+        return stripped
+
     @override
-    def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> Any:
+    def mkdir(self, path: PathLike, create_parents: bool = True, **kwargs: Any) -> Any:
         """Create a directory at the given path.
 
         Args:
@@ -304,23 +315,23 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             self.makedirs(self._parent(path), exist_ok=True)
         par = self._parent(path)
         parent_id = self.info(par)["id"]
+        stripped_path = self._path_str(path)
         meta = {
-            "name": path.rstrip("/").rsplit("/", 1)[-1],
+            "name": stripped_path.rstrip("/").rsplit("/", 1)[-1],
             "mimeType": DIR_MIME_TYPE,
             "parents": [parent_id],
         }
-        if self.exists(path):
-            raise FileExistsError(path)
-        LOGGER.debug(f"Creating {path}, child of {parent_id}")
+        if self.exists(stripped_path):
+            raise FileExistsError(stripped_path)
+        LOGGER.debug(f"Creating {stripped_path}, child of {parent_id}")
         out = self.files.create(body=meta, supportsAllDrives=True).execute()
         if par in self.dircache:
-            # pyrefly: ignore [bad-argument-type]
             self.dircache[par].append(_finfo_from_response(out, path_prefix=par))
-        self.dircache[path] = []
+        self.dircache[stripped_path] = []
         return out
 
     @override
-    def makedirs(self, path: str, exist_ok: bool = True) -> None:
+    def makedirs(self, path: PathLike, exist_ok: bool = True) -> None:
         """Create a directory and any missing parent directories.
 
         Args:
@@ -330,7 +341,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             FileExistsError: If ``exist_ok`` is False and the directory already exists.
         """
-        parts = path.split("/")
+        parts = self._path_str(path).split("/")
         path = ""
         for i, part in enumerate(parts):
             path = path + "/" + part if path else part
@@ -340,8 +351,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 raise FileExistsError(path)
 
     @override
-    # pyrefly: ignore [bad-override]
-    def rm_file(self, path: str, file_id: str | None = None) -> None:
+    def _rm(self, path: PathLike, file_id: str | None = None) -> None:
         """Delete a single file or directory by path.
 
         Args:
@@ -360,7 +370,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @override
     def rm(
-        self, path: str, recursive: bool = True, maxdepth: int | None = None
+        self, path: PathLike, recursive: bool = True, maxdepth: int | None = None
     ) -> None:
         """Delete a file or directory.
 
@@ -377,7 +387,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.rm_file(path)
 
     @override
-    def rmdir(self, path: str) -> None:
+    def rmdir(self, path: PathLike) -> None:
         """Remove an empty directory.
 
         Args:
@@ -391,14 +401,14 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.rm(path, recursive=False)
 
     @override
-    def invalidate_cache(self, path: str | None = None) -> None:
+    def invalidate_cache(self, path: PathLike | None = None) -> None:
         if path is None:
             self.dircache.clear()
         else:
             self.dircache.pop(self._strip_protocol(path), None)
         super().invalidate_cache(path)
 
-    def export(self, path: str, mime_type: str) -> Any:
+    def export(self, path: PathLike, mime_type: str) -> Any:
         """Export a Google-native file to another format and download it.
 
         Use this for Docs, Sheets, Slides, and other Google Workspace files that
@@ -439,14 +449,20 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         raise ValueError(f"Drive name {drive!r} refers to multiple shared drives")
 
     @override
-    # pyrefly: ignore [bad-override]
-    def ls(self, path: str, detail: bool = False, trashed: bool = False) -> list[Any]:
+    def ls(
+        self,
+        path: PathLike,
+        detail: bool = False,
+        trashed: bool = False,
+        **kwargs: Any,
+    ) -> list[Any]:
         """List files and directories under ``path``.
 
         Args:
             path: Directory path to list. Use ``""`` for the filesystem root.
             detail: If True, return full file-info dicts; otherwise return paths only.
             trashed: If True, include trashed items in the listing.
+            kwargs: Ignored; accepted for fsspec compatibility.
 
         Returns:
             Sorted list of child paths, or list of file-info dicts when ``detail``
@@ -456,13 +472,12 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             FileNotFoundError: If ``path`` does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
-        stripped_path = self._strip_protocol(path)
+        stripped_path: str = self._path_str(path)
         files = self._ls_from_cache(stripped_path)
 
         if files is None:
             # get parent ID
             if "/" in stripped_path:
-                # pyrefly: ignore [missing-attribute]
                 pref = stripped_path.rsplit("/", 1)[0]
                 info = self.info(pref, trashed=trashed)
                 file_id = info["id"]
@@ -492,7 +507,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                     files = self._list_directory_by_id(
                         this_file[0]["id"],
                         trashed=trashed,
-                        # pyrefly: ignore [bad-argument-type]
                         path_prefix=stripped_path,
                     )
                     self.dircache[stripped_path] = files
@@ -503,19 +517,21 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             return sorted([f["name"] for f in files])
 
     @override
-    # pyrefly: ignore [bad-override]
-    def info(self, path: str, trashed: bool = False) -> dict[str, Any]:
+    def info(
+        self, path: PathLike, trashed: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         """Return metadata for a file or directory.
 
         Args:
             path: Path to inspect. Use ``""`` for the filesystem root.
             trashed: If True, allow resolving trashed files.
+            kwargs: Ignored; accepted for fsspec compatibility.
 
         Returns:
             File-info dict including ``name``, ``type``, ``size``, and Drive API
             fields.
         """
-        stripped_path = self._strip_protocol(path)
+        stripped_path = self._path_str(path)
         if stripped_path == "":
             return {
                 "name": stripped_path,
@@ -542,7 +558,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self, file_id: str, trashed: bool = False, path_prefix: str | None = None
     ) -> list[Any]:
         all_files = []
-        page_token = None
+        page_token: str | None = None
         afields = "nextPageToken, files(%s)" % FIELDS
         if file_id == ROOT_ID and self.drive is not None:
             query = f"'{self.drive}' in parents "
@@ -553,18 +569,26 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         kwargs = self._drive_kw()
         while True:
             LOGGER.debug("%s ; prefix %s", query, path_prefix)
-            response = self.files.list(
-                q=query,
-                spaces=self.spaces,
-                fields=afields,
-                # pyrefly: ignore [bad-argument-type]
-                pageToken=page_token,
-                orderBy="name",
-                pageSize=1000,
-                **kwargs,
-            ).execute()
+            if page_token is None:
+                response = self.files.list(
+                    q=query,
+                    spaces=self.spaces,
+                    fields=afields,
+                    orderBy="name",
+                    pageSize=1000,
+                    **kwargs,
+                ).execute()
+            else:
+                response = self.files.list(
+                    q=query,
+                    spaces=self.spaces,
+                    fields=afields,
+                    pageToken=page_token,
+                    orderBy="name",
+                    pageSize=1000,
+                    **kwargs,
+                ).execute()
             for f in response.get("files", []):
-                # pyrefly: ignore [bad-argument-type]
                 all_files.append(_finfo_from_response(f, path_prefix))
             page_token = response.get("nextPageToken", None)
             if page_token is None:
@@ -572,16 +596,31 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         return all_files
 
     @override
-    # pyrefly: ignore [bad-override]
-    def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> "GoogleDriveFile":
-        return GoogleDriveFile(self, path, mode=mode, **kwargs)
+    def _open(
+        self,
+        path: PathLike,
+        mode: str = "rb",
+        block_size: int | None = None,
+        autocommit: bool = True,
+        cache_options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AbstractBufferedFile:
+        return GoogleDriveFile(
+            self,
+            path,
+            mode=mode,
+            block_size=block_size if block_size is not None else DEFAULT_BLOCK_SIZE,
+            autocommit=autocommit,
+            cache_options=cache_options,
+            **kwargs,
+        )
 
 
 class GoogleDriveFile(AbstractBufferedFile):
     def __init__(
         self,
         fs: GoogleDriveFileSystem,
-        path: str,
+        path: PathLike,
         mode: str = "rb",
         block_size: int = DEFAULT_BLOCK_SIZE,
         autocommit: bool = True,
@@ -637,8 +676,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             raise
 
     @override
-    # pyrefly: ignore [bad-override]
-    def _upload_chunk(self, final: bool = False) -> bool:
+    def _upload_chunk(self, final: bool = False) -> None:
         """Upload one chunk of a resumable multi-part upload.
 
         Args:
@@ -695,7 +733,6 @@ class GoogleDriveFile(AbstractBufferedFile):
             assert status == 308
         else:
             raise IOError
-        return True
 
     @override
     def commit(self) -> None:

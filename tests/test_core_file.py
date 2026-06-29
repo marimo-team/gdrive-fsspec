@@ -118,7 +118,7 @@ def test_initiate_upload(mocked_fs: MockedDriveFS) -> None:
     }
 
 
-def test_upload_chunk_partial_returns_true(mocked_fs: MockedDriveFS) -> None:
+def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     mocked_fs.files._http.request.return_value = (
         {"status": "308", "range": "0-999"},
@@ -129,7 +129,7 @@ def test_upload_chunk_partial_returns_true(mocked_fs: MockedDriveFS) -> None:
     file.offset = 0
 
     try:
-        assert file._upload_chunk(final=False) is True
+        file._upload_chunk(final=False)
     finally:
         file.closed = True
 
@@ -151,7 +151,7 @@ def test_upload_chunk_final_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     file.offset = 0
 
     try:
-        assert file._upload_chunk(final=True) is True
+        file._upload_chunk(final=True)
     finally:
         file.closed = True
 

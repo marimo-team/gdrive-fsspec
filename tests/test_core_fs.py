@@ -116,11 +116,11 @@ def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
-def test_rm_file_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
+def test_rm_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.info = mock.Mock()
 
-    fs.rm_file("parent/file", file_id="explicit-id")
+    fs._rm("parent/file", file_id="explicit-id")
 
     mocked_fs.files.delete.assert_called_once_with(
         fileId="explicit-id", supportsAllDrives=True
