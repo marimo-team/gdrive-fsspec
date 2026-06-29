@@ -83,7 +83,8 @@ jobs:
           uv run pytest \
             --cov=gdrive_fsspec \
             --cov-report=term-missing \
-            --cov-report=xml
+            --cov-report=xml \
+            --cov-fail-under=95
 
   integration:
     name: Integration tests

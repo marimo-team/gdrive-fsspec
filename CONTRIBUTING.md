@@ -52,11 +52,15 @@ uv run pyrefly check
 uv run pytest -v
 ```
 
-**Coverage** (same unit tests; reports missing lines):
+**Coverage** (same unit tests; reports missing lines; CI requires at least 95%):
 
 ```sh
 uv run pytest --cov=gdrive_fsspec --cov-report=term-missing
 ```
+
+## Docstrings
+
+Use reStructuredText (RST) double backticks for inline code in docstrings—for example, ``drive`` rather than `drive`. This matches the existing codebase and renders correctly with Sphinx-style tooling.
 
 ## Integration tests
 
