@@ -14,6 +14,7 @@ from gdrive_fsspec.core import (
     GoogleDriveFileSystem,
     MultipleFilesError,
     _parse_range_end,
+    _with_supports_all_drives,
 )
 
 
@@ -260,10 +261,39 @@ def test_upload_chunk_partial_accept_keeps_unsent_tail(
         ("", None),  # empty header
         ("bytes=*", None),  # no dash
         ("bytes=0-notanint", None),  # garbled end
+        ("bytes=10-20", None),  # non-zero start: must not be read as end=20
+        ("10-20", None),  # same, bare form
+        ("garbage-20", None),  # not a range at all
+        ("bytes=0-", None),  # missing end
     ],
 )
 def test_parse_range_end(header: str | None, expected: int | None) -> None:
     assert _parse_range_end(header) == expected
+
+
+@pytest.mark.parametrize(
+    "url,expected_query",
+    [
+        # No existing param: it is added.
+        ("https://up/resume?upload_id=x", "upload_id=x&supportsAllDrives=true"),
+        # Already true: stays true, not duplicated.
+        (
+            "https://up/resume?upload_id=x&supportsAllDrives=true",
+            "upload_id=x&supportsAllDrives=true",
+        ),
+        # Explicitly false: forced to true (the substring check missed this).
+        (
+            "https://up/resume?supportsAllDrives=false&upload_id=x",
+            "supportsAllDrives=true&upload_id=x",
+        ),
+        # No query string at all.
+        ("https://up/resume", "supportsAllDrives=true"),
+    ],
+)
+def test_with_supports_all_drives(url: str, expected_query: str) -> None:
+    from urllib.parse import urlsplit
+
+    assert urlsplit(_with_supports_all_drives(url)).query == expected_query
 
 
 def _consume(

@@ -239,6 +239,10 @@ def test_transaction_rollback_discards_upload(fs: GoogleDriveFileSystem) -> None
             finally:
                 f.closed = True
 
+    # discard() clears location only after a successful DELETE/499, so this
+    # proves the rollback actually cancelled the session (not merely that the
+    # file was never committed, which a leaked session would also satisfy).
+    assert f.location is None, "rollback should cancel the resumable session"
     # The aborted upload must not have produced a committed file.
     fs.invalidate_cache()
     assert not fs.exists(fn)

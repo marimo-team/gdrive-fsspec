@@ -8,6 +8,7 @@ import pathlib
 import warnings
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httplib2
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
@@ -64,12 +65,36 @@ def _normalize_path(prefix: str, name: str) -> str:
     return "/" + "/".join([raw_prefix, name])
 
 
+def _with_supports_all_drives(url: str) -> str:
+    """Return ``url`` with ``supportsAllDrives=true`` set, overriding any value.
+
+    The resumable session URI is opaque and may already carry query parameters
+    (``upload_id``, ``session_crd``). Setting the parameter via the query parser
+    forces ``true`` even if the URL somehow already had ``supportsAllDrives=false``.
+    """
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["supportsAllDrives"] = "true"
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
 def _parse_range_end(range_header: str | None) -> int | None:
-    """Last stored byte index from a resumable ``Range: bytes=0-<end>`` header."""
-    if not range_header or "-" not in range_header:
+    """Last stored byte index from a resumable ``Range`` header.
+
+    Resumable uploads report stored bytes as ``bytes=0-<end>`` (the optional
+    ``bytes=`` unit is tolerated). Only ranges starting at ``0`` are accepted —
+    anything else (a non-zero start, missing dash, or non-integer end) returns
+    ``None``, since ``_consume_accepted`` assumes the range covers from the
+    start of the object and a malformed value would miscount accepted bytes.
+    """
+    if not range_header:
+        return None
+    spec = range_header.strip().removeprefix("bytes=")
+    start, sep, end = spec.partition("-")
+    if not sep or start != "0":
         return None
     try:
-        return int(range_header.rsplit("-", 1)[1])
+        return int(end)
     except ValueError:
         return None
 
@@ -1002,12 +1027,8 @@ class GoogleDriveFile(AbstractBufferedFile):
             LOGGER.debug("Abort file creation %s", self.path)
             return
         LOGGER.debug("Cancel file creation %s", self.path)
-        location = self.location
-        if "supportsAllDrives" not in location:
-            sep = "&" if "?" in location else "?"
-            location = f"{location}{sep}supportsAllDrives=true"
         response, _ = self._authed_request(
-            location,
+            _with_supports_all_drives(self.location),
             "DELETE",
             headers={"Content-Length": "0"},
         )
