@@ -162,22 +162,25 @@ def test_rm_non_empty_folder_without_recursive_raises(
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=["child"])
-    fs.rm_file = mock.Mock()
 
     with pytest.raises(ValueError, match="non-empty"):
         fs.rm("folder", recursive=False)
 
-    fs.rm_file.assert_not_called()
+    # The guard must fire before any Drive delete is issued.
+    mocked_fs.files.delete.assert_not_called()
 
 
-def test_rm_delegates_to_rm_file(mocked_fs: MockedDriveFS) -> None:
+def test_rm_deletes_file(mocked_fs: MockedDriveFS) -> None:
+    # rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=False)
-    fs.rm_file = mock.Mock()
+    fs.info = mock.Mock(return_value={"id": "file-id"})
 
     fs.rm("file.txt")
 
-    fs.rm_file.assert_called_once_with("file.txt")
+    mocked_fs.files.delete.assert_called_once_with(
+        fileId="file-id", supportsAllDrives=True
+    )
 
 
 def test_rmdir_requires_directory(mocked_fs: MockedDriveFS) -> None:
@@ -189,14 +192,17 @@ def test_rmdir_requires_directory(mocked_fs: MockedDriveFS) -> None:
 
 
 def test_rmdir_deletes_empty_directory(mocked_fs: MockedDriveFS) -> None:
+    # rmdir -> rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=[])
-    fs.rm_file = mock.Mock()
+    fs.info = mock.Mock(return_value={"id": "dir-id"})
 
     fs.rmdir("empty")
 
-    fs.rm_file.assert_called_once_with("empty")
+    mocked_fs.files.delete.assert_called_once_with(
+        fileId="dir-id", supportsAllDrives=True
+    )
 
 
 def test_ls_from_dircache_returns_sorted_names(
