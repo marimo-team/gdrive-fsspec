@@ -231,7 +231,7 @@ def test_rm_deletes_file(mocked_fs: MockedDriveFS) -> None:
     # rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.info = mock.Mock(return_value=_deletable_info())
 
     fs.rm("file.txt")
 
@@ -253,7 +253,7 @@ def test_rmdir_deletes_empty_directory(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=[])
-    fs.info = mock.Mock(return_value={"id": "dir-id"})
+    fs.info = mock.Mock(return_value=_deletable_info(id="dir-id"))
 
     fs.rmdir("empty")
 
