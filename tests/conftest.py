@@ -150,9 +150,13 @@ def readonly_fs() -> GoogleDriveFileSystem:
     creds = os.getenv("GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH")
     if not creds or not creds.strip():
         pytest.skip("GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH not set")
+    drive = os.getenv("GDRIVE_FSSPEC_DRIVE")
+    if not drive:
+        # The permission-denied scenario is shared-drive-specific.
+        pytest.skip("GDRIVE_FSSPEC_DRIVE not set")
     return GoogleDriveFileSystem(
         skip_instance_cache=True,
         token="service_account",
         creds=creds,
-        drive=os.getenv("GDRIVE_FSSPEC_DRIVE"),
+        drive=drive,
     )

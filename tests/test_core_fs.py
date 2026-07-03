@@ -227,6 +227,16 @@ def test_rm_non_empty_folder_without_recursive_raises(
     mocked_fs.files.delete.assert_not_called()
 
 
+def test_rm_root_raises_value_error(mocked_fs: MockedDriveFS) -> None:
+    # Deleting the root must fail clearly, not with a misleading PermissionError.
+    fs = mocked_fs.fs
+
+    with pytest.raises(ValueError, match="root"):
+        fs._rm("")
+
+    mocked_fs.files.delete.assert_not_called()
+
+
 def test_rm_deletes_file(mocked_fs: MockedDriveFS) -> None:
     # rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
     fs = mocked_fs.fs
@@ -404,6 +414,44 @@ def test_info_without_fields_reuses_listing_entry_without_get(
     assert info["type"] == "file"
 
 
+def test_info_empty_fields_uses_listing_fast_path(mocked_fs: MockedDriveFS) -> None:
+    # A blank mask is equivalent to no extra fields: reuse the listing entry.
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {"name": "file.txt", "id": "file-id", "type": "file", "mimeType": "text/plain"}
+    ]
+
+    info = fs.info("file.txt", fields="")
+
+    mocked_fs.files.get.assert_not_called()
+    assert info["id"] == "file-id"
+
+
+def test_info_ignores_reserved_kwargs_for_files_get(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # Forwarded **kwargs must not collide with the explicit files.get args.
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {"name": "file.txt", "id": "file-id", "type": "file", "mimeType": "text/plain"}
+    ]
+    mocked_fs.files.get.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "file.txt",
+        "mimeType": "text/plain",
+        "driveId": "drive-1",
+    }
+
+    info = fs.info(
+        "file.txt", fields="driveId", supportsAllDrives=False, fileId="bogus"
+    )
+
+    _, kwargs = mocked_fs.files.get.call_args
+    assert kwargs["fileId"] == "file-id"
+    assert kwargs["supportsAllDrives"] is True
+    assert info["driveId"] == "drive-1"
+
+
 def test_ls_non_canonical_bypasses_cache_read_and_write(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:
@@ -434,6 +482,18 @@ def test_ls_fields_without_detail_raises(anon_fs: GoogleDriveFileSystem) -> None
     with pytest.raises(ValueError, match="detail=True"):
         anon_fs.ls("", fields="driveId")
 
+    anon_fs._list_directory_by_id.assert_not_called()
+
+
+def test_ls_empty_fields_uses_cache(anon_fs: GoogleDriveFileSystem) -> None:
+    # A blank mask must not bypass the cache; it means no extra fields.
+    cached = [{"name": "a", "id": "1", "type": "file"}]
+    anon_fs.dircache[""] = cached
+    anon_fs._list_directory_by_id = mock.Mock()
+
+    result = anon_fs.ls("", detail=True, fields="")
+
+    assert result == cached
     anon_fs._list_directory_by_id.assert_not_called()
 
 

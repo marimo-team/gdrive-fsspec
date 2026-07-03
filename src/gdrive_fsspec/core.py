@@ -19,10 +19,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, build_http
 
-from gdrive_fsspec.utils import merge_fields
-
 from .types import FileInfo
 from .typing_utils import override
+from .utils import merge_fields
 
 if TYPE_CHECKING:
     from googleapiclient._apis.drive.v3.resources import DriveResource
@@ -475,6 +474,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             path: Path of the file or folder to delete.
         """
         stripped_path = self._path_str(path)
+        if stripped_path == "":
+            raise ValueError("Cannot delete the filesystem root")
         file_info = self.info(stripped_path, fields="driveId,capabilities/canDelete")
         file_id = file_info["id"]
         LOGGER.debug(f"Removing {stripped_path}, file_id={file_id}")
@@ -650,6 +651,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             FileNotFoundError: If ``path`` does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
+        # A blank mask means "no extra fields".
+        fields = (fields or "").strip() or None
         if fields is not None and not detail:
             raise ValueError(
                 "fields requires detail=True; names-only output discards the requested fields"
@@ -751,7 +754,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             }
             return cast(dict[str, Any], info)
 
-        # Plain metadata comes from the parent listing, extra fields require a per-file fetch.
+        # A blank mask means "no extra fields".
+        fields = (fields or "").strip() or None
         if fields is None:
             file_info = self._resolve_entry(stripped_path, trashed=trashed)
         else:
@@ -770,6 +774,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         listing, which scales with the number of siblings.
         """
         entry = self._resolve_entry(stripped_path, trashed=trashed)
+        for reserved in ("fileId", "fields", "supportsAllDrives"):
+            kwargs.pop(reserved, None)
+
         meta = self.files.get(
             fileId=entry["id"],
             fields=merge_fields(INFO_FIELDS, fields),
