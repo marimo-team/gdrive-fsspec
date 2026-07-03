@@ -392,6 +392,17 @@ def test_ls_non_canonical_bypasses_cache_read_and_write(
     assert "" not in anon_fs.dircache
 
 
+def test_ls_fields_without_detail_raises(anon_fs: GoogleDriveFileSystem) -> None:
+    # Requesting fields with detail=False would silently discard them, since the
+    # names-only result carries no metadata. Reject the misuse instead.
+    anon_fs._list_directory_by_id = mock.Mock()
+
+    with pytest.raises(ValueError, match="detail=True"):
+        anon_fs.ls("", fields="driveId")
+
+    anon_fs._list_directory_by_id.assert_not_called()
+
+
 def test_ls_skips_cache_when_trashed_requested(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:

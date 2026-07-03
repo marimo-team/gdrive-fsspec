@@ -614,6 +614,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         path: PathLike,
         detail: Literal[True],
         trashed: bool = False,
+        fields: str | None = None,
         **kwargs: Any,
     ) -> list[FileInfo]: ...
 
@@ -642,9 +643,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             is True.
 
         Raises:
+            ValueError: If ``fields`` is given while ``detail`` is False, since the
+                names-only result would discard the requested fields.
             FileNotFoundError: If ``path`` does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
+        if fields is not None and not detail:
+            raise ValueError(
+                "fields requires detail=True; names-only output discards the requested fields"
+            )
+
         stripped_path: str = self._path_str(path)
 
         # We only check the cache for typical API calls, we avoid caching if user passes extra fields or trashed files.
