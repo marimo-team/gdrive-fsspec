@@ -44,6 +44,7 @@ def _write_file(
         raise FileNotFoundError(p)
 
     fs.info = mock.Mock(side_effect=_info)
+    fs._path_to_id = mock.Mock(return_value=parent_id)
     file = GoogleDriveFile(fs, path, mode="wb")
     file.location = "https://example.invalid/upload?upload_id=abc"
     return file
@@ -52,6 +53,7 @@ def _write_file(
 def _read_file(
     fs: GoogleDriveFileSystem, path: str = "path/file.txt"
 ) -> GoogleDriveFile:
+    fs._path_to_id = mock.Mock(return_value="file-id")
     fs.info = mock.Mock(
         return_value={"id": "file-id", "size": 5, "type": "file", "name": path}
     )
@@ -170,8 +172,12 @@ def test_initiate_upload_existing_file_patches(mocked_fs: MockedDriveFS) -> None
 def test_open_wb_propagates_multiple_files_error(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     # A path that already resolves to duplicates must not be overwritten by
-    # creating a third copy; surface the ambiguity instead.
-    fs.info = mock.Mock(side_effect=MultipleFilesError("parent/file.txt"))
+    # creating a third copy; surface the ambiguity instead. Drive the real
+    # resolution path (dircache -> _path_to_id) rather than mocking info().
+    fs.dircache["parent"] = [
+        {"name": "parent/file.txt", "id": "id-1", "type": "file"},
+        {"name": "parent/file.txt", "id": "id-2", "type": "file"},
+    ]
 
     with pytest.raises(MultipleFilesError):
         GoogleDriveFile(fs, "parent/file.txt", mode="wb")

@@ -114,22 +114,22 @@ def _parse_range_end(range_header: str | None) -> int | None:
 
 
 def _finfo_from_response(
-    f: File | Mapping[str, Any], path_prefix: str | None = None
+    file: File | Mapping[str, Any], path_prefix: str | None = None
 ) -> FileInfo:
     # strictly speaking, other types might be capable of having children,
     # such as packages
     # TODO: check specifically for links
-    ftype = "directory" if f.get("mimeType") == DIR_MIME_TYPE else "file"
+    file_type = "directory" if file.get("mimeType") == DIR_MIME_TYPE else "file"
     if path_prefix:
-        name = _normalize_path(path_prefix, f["name"])
+        name = _normalize_path(path_prefix, file["name"])
     else:
-        name = f["name"]
+        name = file["name"]
     info: FileInfo = {
         "name": name.lstrip("/"),
-        "size": int(f.get("size", 0)),
-        "type": ftype,
+        "size": int(file.get("size", 0)),
+        "type": file_type,
     }
-    return cast(FileInfo, {**f, **info})
+    return cast(FileInfo, {**file, **info})
 
 
 class MultipleFilesError(FileNotFoundError):
@@ -425,22 +425,24 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             FileExistsError: If a file or folder already exists at ``path``.
         """
-        if create_parents and self._parent(path):
-            self.makedirs(self._parent(path), exist_ok=True)
-        par = self._parent(path)
-        parent_id = self.info(par)["id"]
+        parent = self._parent(path)
+        if create_parents and parent:
+            self.makedirs(parent, exist_ok=True)
+
         stripped_path = self._path_str(path)
+        if self.exists(stripped_path):
+            raise FileExistsError(stripped_path)
+
+        parent_id = self._path_to_id(parent)
         meta = {
             "name": stripped_path.rstrip("/").rsplit("/", 1)[-1],
             "mimeType": DIR_MIME_TYPE,
             "parents": [parent_id],
         }
-        if self.exists(stripped_path):
-            raise FileExistsError(stripped_path)
         LOGGER.debug(f"Creating {stripped_path}, child of {parent_id}")
         out: File = self.files.create(body=meta, supportsAllDrives=True).execute()
-        if par in self.dircache:
-            self.dircache[par].append(_finfo_from_response(out, path_prefix=par))
+        if parent in self.dircache:
+            self.dircache[parent].append(_finfo_from_response(out, path_prefix=parent))
         self.dircache[stripped_path] = []
         return out
 
@@ -492,9 +494,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         parent = self._parent(stripped_path)
         if parent in self.dircache:
             listing = self.dircache[parent]
-            i = [i for i, li in enumerate(listing) if li["name"] == stripped_path][0]
-            listing.pop(i)
+            self.dircache[parent] = [
+                li for li in listing if li["name"] != stripped_path
+            ]
 
+        # Drop any cached listing rooted at the deleted path (it was a directory).
         self.dircache.pop(stripped_path, None)
 
     @override
@@ -611,6 +615,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         path: PathLike,
         detail: Literal[True],
         trashed: bool = False,
+        fields: str | None = None,
         **kwargs: Any,
     ) -> list[FileInfo]: ...
 
@@ -620,6 +625,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         path: PathLike,
         detail: bool = False,
         trashed: bool = False,
+        fields: str | None = None,
         **kwargs: Any,
     ) -> list[str] | list[FileInfo]:
         """List files and directories under ``path``.
@@ -628,60 +634,89 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             path: Directory path to list. Use ``""`` for the filesystem root.
             detail: If True, return full file-info dicts; otherwise return paths only.
             trashed: If True, include trashed items in the listing.
-            kwargs: Ignored; accepted for fsspec compatibility.
+            fields: Extra Drive fields to request on top of the defaults, as a
+                comma-separated string (e.g. ``"driveId,capabilities/canDelete"``).
+                See https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource.
+            kwargs: Not used; accepted for fsspec compatibility.
 
         Returns:
             Sorted list of child paths, or list of file-info dicts when ``detail``
             is True.
 
         Raises:
+            ValueError: If ``fields`` is given while ``detail`` is False, since the
+                names-only result would discard the requested fields.
             FileNotFoundError: If ``path`` does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
-        stripped_path: str = self._path_str(path)
-        files: list[FileInfo] | None = self._ls_from_cache(stripped_path)
-
-        if files is None:
-            # get parent ID
-            if "/" in stripped_path:
-                pref = stripped_path.rsplit("/", 1)[0]
-                info = self.info(pref, trashed=trashed)
-                file_id = info["id"]
-            else:
-                pref = ""
-                file_id = self.root_file_id
-
-            # list parent
-            files = self._list_directory_by_id(
-                file_id, trashed=trashed, path_prefix=pref, **kwargs
+        if fields is not None and not detail:
+            raise ValueError(
+                "fields requires detail=True; names-only output discards the requested fields"
             )
-            # An empty listing for the root is a valid, empty directory; for any
-            # other path an empty listing means the path does not exist.
-            if files or stripped_path == "":
-                self.dircache[pref] = files
-            else:
-                raise FileNotFoundError(stripped_path)
 
-            if stripped_path:
-                # else we listed the top-level and are done
-                this_file = [f for f in files if f["name"] == stripped_path]
-                if len(this_file) == 0:
-                    raise FileNotFoundError(stripped_path)
-                elif len(this_file) > 1:
-                    raise MultipleFilesError(stripped_path)
-                if this_file[0]["type"] == "directory":
-                    files = self._list_directory_by_id(
-                        this_file[0]["id"],
-                        trashed=trashed,
-                        path_prefix=stripped_path,
-                        **kwargs,
-                    )
-                    self.dircache[stripped_path] = files
+        stripped_path: str = self._path_str(path)
+
+        # We only check the cache for typical API calls, we avoid caching if user passes extra fields or trashed files.
+        use_cache = fields is None and not trashed
+
+        if use_cache and (cached := self.dircache.get(stripped_path)) is not None:
+            files: list[FileInfo] = cached
+        else:
+            files = self._ls_uncached(
+                stripped_path, trashed=trashed, fields=fields, cache_results=use_cache
+            )
 
         if detail:
             return files
         else:
-            return sorted([f["name"] for f in files])
+            return sorted([file["name"] for file in files])
+
+    def _ls_uncached(
+        self,
+        stripped_path: str,
+        *,
+        trashed: bool = False,
+        fields: str | None = None,
+        cache_results: bool = True,
+    ) -> list[FileInfo]:
+        """List a path's contents from the API, populating the dircache.
+
+        Args:
+            stripped_path: The path to list.
+            trashed: If True, include trashed items in the listing.
+            fields: Extra Drive fields to request on top of the defaults.
+            cache_results: If True, set the cache for the listing.
+        """
+        if stripped_path == "":
+            # Empty path is the root directory.
+            files = self._list_directory_by_id(
+                self.root_file_id, trashed=trashed, path_prefix="", fields=fields
+            )
+            if cache_results:
+                self.dircache[stripped_path] = files
+            return files
+
+        parent = self._parent(stripped_path)
+        siblings = self.ls(parent, detail=True, trashed=trashed, fields=fields)
+        matches = [file for file in siblings if file["name"] == stripped_path]
+
+        if len(matches) == 0:
+            raise FileNotFoundError(stripped_path)
+        if len(matches) > 1:
+            raise MultipleFilesError(stripped_path)
+
+        entry = matches[0]
+        if entry["type"] != "directory":
+            # `ls` on a file returns the file's own info, and is not a directory
+            # so we don't cache it under the file path
+            return [entry]
+
+        files = self._list_directory_by_id(
+            entry["id"], trashed=trashed, path_prefix=stripped_path, fields=fields
+        )
+        if cache_results:
+            self.dircache[stripped_path] = files
+        return files
 
     @override
     def info(
@@ -699,6 +734,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             fields: Extra Drive fields to request on top of the defaults, as a
                 comma-separated string (e.g. ``"driveId,capabilities/canDelete"``).
                 See https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource.
+            kwargs: Additional arguments to pass to the ``files.get`` request.
 
         Returns:
             File-info dict including ``name``, ``type``, ``size``, and Drive API fields.
@@ -713,7 +749,70 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 "id": self.root_file_id,
             }
             return cast(dict[str, Any], info)
-        return super().info(stripped_path, trashed=trashed, fields=fields, **kwargs)
+
+        # Plain metadata comes from the parent listing, extra fields require a per-file fetch.
+        if fields is None:
+            file_info = self._resolve_entry(stripped_path, trashed=trashed)
+        else:
+            file_info = self._info_by_id(
+                stripped_path, fields, trashed=trashed, **kwargs
+            )
+        return cast(dict[str, Any], file_info)
+
+    def _info_by_id(
+        self, stripped_path: str, fields: str, *, trashed: bool = False, **kwargs: Any
+    ) -> FileInfo:
+        """Return a path's info via ``files.get`` by id, with extra ``fields``.
+
+        ``files.get`` is O(1) in directory size and bypasses the listing cache,
+        so the extra fields are always fresh — unlike enriching the whole parent
+        listing, which scales with the number of siblings.
+        """
+        entry = self._resolve_entry(stripped_path, trashed=trashed)
+        meta = self.files.get(
+            fileId=entry["id"],
+            fields=merge_fields(INFO_FIELDS, fields),
+            supportsAllDrives=True,
+            **kwargs,
+        ).execute()
+        parent = self._parent(stripped_path)
+        return _finfo_from_response(meta, path_prefix=parent)
+
+    def _resolve_entry(self, path: PathLike, *, trashed: bool = False) -> FileInfo:
+        """Resolve a path to its own FileInfo by matching it in its parent listing.
+
+        Args:
+            path: Path to resolve.
+            trashed: If True, allow resolving trashed files.
+
+        Returns:
+            The FileInfo for the resolved path.
+
+        Raises:
+            ValueError: If called with the root path, which has no parent to
+                list — callers must handle the root themselves.
+            FileNotFoundError: If ``path`` does not exist.
+            MultipleFilesError: If multiple files share the same path name.
+        """
+        stripped_path = self._path_str(path)
+        if stripped_path == "":
+            raise ValueError("_resolve_entry is not defined for the root path")
+        parent = self._parent(stripped_path)
+        matches = [
+            file
+            for file in self.ls(parent, detail=True, trashed=trashed)
+            if file["name"] == stripped_path
+        ]
+        if len(matches) == 0:
+            raise FileNotFoundError(stripped_path)
+        if len(matches) > 1:
+            raise MultipleFilesError(stripped_path)
+        return matches[0]
+
+    def _path_to_id(self, path: PathLike, trashed: bool = False) -> str:
+        if self._path_str(path) == "":
+            return self.root_file_id
+        return self._resolve_entry(path, trashed=trashed)["id"]
 
     def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:
@@ -768,8 +867,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                     pageSize=1000,
                     **kwargs,
                 ).execute()
-            for f in response.get("files", []):
-                all_files.append(_finfo_from_response(f, path_prefix))
+            for file in response.get("files", []):
+                all_files.append(_finfo_from_response(file, path_prefix))
             page_token = response.get("nextPageToken", None)
             if page_token is None:
                 break
@@ -858,7 +957,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             self.location = None
             self.file_id: str | None = existing_id
         else:
-            self.file_id = fs.info(path)["id"]
+            self.file_id = fs._path_to_id(path)
             self._media_object: Any | None = None
 
     @override
@@ -1052,7 +1151,7 @@ class GoogleDriveFile(AbstractBufferedFile):
                 body=json.dumps({}).encode(),
             )
         else:
-            parent_id = self.fs.info(self.fs._parent(self.path))["id"]
+            parent_id = self.fs._path_to_id(self.fs._parent(self.path))
             response, _ = self._authed_request(
                 f"{UPLOAD_URL}{query}",
                 "POST",
