@@ -428,16 +428,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         parent = self._parent(path)
         if create_parents and parent:
             self.makedirs(parent, exist_ok=True)
-        parent_id = self._path_to_id(parent)
 
         stripped_path = self._path_str(path)
+        if self.exists(stripped_path):
+            raise FileExistsError(stripped_path)
+
+        parent_id = self._path_to_id(parent)
         meta = {
             "name": stripped_path.rstrip("/").rsplit("/", 1)[-1],
             "mimeType": DIR_MIME_TYPE,
             "parents": [parent_id],
         }
-        if self.exists(stripped_path):
-            raise FileExistsError(stripped_path)
         LOGGER.debug(f"Creating {stripped_path}, child of {parent_id}")
         out: File = self.files.create(body=meta, supportsAllDrives=True).execute()
         if parent in self.dircache:
@@ -749,38 +750,69 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             }
             return cast(dict[str, Any], info)
 
-        file_id = self._path_to_id(path, trashed=trashed)
+        # Plain metadata comes from the parent listing, extra fields require a per-file fetch.
+        if fields is None:
+            file_info = self._resolve_entry(stripped_path, trashed=trashed)
+        else:
+            file_info = self._info_by_id(
+                stripped_path, fields, trashed=trashed, **kwargs
+            )
+        return cast(dict[str, Any], file_info)
+
+    def _info_by_id(
+        self, stripped_path: str, fields: str, *, trashed: bool = False, **kwargs: Any
+    ) -> FileInfo:
+        """Return a path's info via ``files.get`` by id, with extra ``fields``.
+
+        ``files.get`` is O(1) in directory size and bypasses the listing cache,
+        so the extra fields are always fresh — unlike enriching the whole parent
+        listing, which scales with the number of siblings.
+        """
+        entry = self._resolve_entry(stripped_path, trashed=trashed)
         meta = self.files.get(
-            fileId=file_id,
+            fileId=entry["id"],
             fields=merge_fields(INFO_FIELDS, fields),
             supportsAllDrives=True,
             **kwargs,
         ).execute()
         parent = self._parent(stripped_path)
+        return _finfo_from_response(meta, path_prefix=parent)
 
-        return cast(dict[str, Any], _finfo_from_response(meta, path_prefix=parent))
-
-    def _path_to_id(self, path: PathLike, trashed: bool = False) -> str:
-        """Resolve a path to its Drive ``fileId``.
+    def _resolve_entry(self, path: PathLike, *, trashed: bool = False) -> FileInfo:
+        """Resolve a path to its own FileInfo by matching it in its parent listing.
 
         Args:
-            path: Path to resolve. ``""`` resolves to the filesystem root.
+            path: Path to resolve.
             trashed: If True, allow resolving trashed files.
 
         Returns:
-            The Drive ``fileId`` for ``path``.
+            The FileInfo for the resolved path.
+
+        Raises:
+            ValueError: If called with the root path, which has no parent to
+                list — callers must handle the root themselves.
+            FileNotFoundError: If ``path`` does not exist.
+            MultipleFilesError: If multiple files share the same path name.
         """
         stripped_path = self._path_str(path)
         if stripped_path == "":
-            return self.root_file_id
+            raise ValueError("_resolve_entry is not defined for the root path")
         parent = self._parent(stripped_path)
-        siblings = self.ls(parent, detail=True, trashed=trashed)
-        matches = [file for file in siblings if file["name"] == stripped_path]
+        matches = [
+            file
+            for file in self.ls(parent, detail=True, trashed=trashed)
+            if file["name"] == stripped_path
+        ]
         if len(matches) == 0:
             raise FileNotFoundError(stripped_path)
         if len(matches) > 1:
             raise MultipleFilesError(stripped_path)
-        return matches[0]["id"]
+        return matches[0]
+
+    def _path_to_id(self, path: PathLike, trashed: bool = False) -> str:
+        if self._path_str(path) == "":
+            return self.root_file_id
+        return self._resolve_entry(path, trashed=trashed)["id"]
 
     def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:

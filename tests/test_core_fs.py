@@ -57,11 +57,16 @@ def test_mkdir_creates_folder_and_updates_dircache(mocked_fs: MockedDriveFS) -> 
 
 
 def test_mkdir_raises_when_path_exists(mocked_fs: MockedDriveFS) -> None:
-    mocked_fs.fs.exists = mock.Mock(return_value=True)
-    mocked_fs.fs._path_to_id = mock.Mock(return_value="parent-id")
+    fs = mocked_fs.fs
+    fs.exists = mock.Mock(return_value=True)
+    fs._path_to_id = mock.Mock(return_value="parent-id")
 
     with pytest.raises(FileExistsError):
-        mocked_fs.fs.mkdir("parent/existing", create_parents=False)
+        fs.mkdir("parent/existing", create_parents=False)
+
+    # The existence check short-circuits before the parent id is resolved.
+    fs._path_to_id.assert_not_called()
+    mocked_fs.files.create.assert_not_called()
 
 
 def test_mkdir_create_parents_calls_makedirs(mocked_fs: MockedDriveFS) -> None:
@@ -370,6 +375,29 @@ def test_info_honors_fields_after_listing_cache_warmed_without_them(
     }
 
 
+def test_info_without_fields_reuses_listing_entry_without_get(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # With no extra fields, the parent listing already carries the full entry,
+    # so info() must not make a per-file files.get request.
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {
+            "name": "file.txt",
+            "id": "file-id",
+            "type": "file",
+            "size": 3,
+            "mimeType": "text/plain",
+        }
+    ]
+
+    info = fs.info("file.txt")
+
+    mocked_fs.files.get.assert_not_called()
+    assert info["id"] == "file-id"
+    assert info["type"] == "file"
+
+
 def test_ls_non_canonical_bypasses_cache_read_and_write(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:
@@ -457,6 +485,12 @@ def test_path_to_id_duplicate_raises_multiple_files_error(
     ]
     with pytest.raises(MultipleFilesError):
         anon_fs._path_to_id("parent/dup")
+
+
+def test_resolve_entry_rejects_root(anon_fs: GoogleDriveFileSystem) -> None:
+    # Root has no parent to list; callers must handle it before resolving.
+    with pytest.raises(ValueError, match="root"):
+        anon_fs._resolve_entry("")
 
 
 def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None:
