@@ -75,6 +75,7 @@ Set these environment variables before running them:
 - `GDRIVE_FSSPEC_CREDENTIALS_PATH` — path to a service-account JSON, or the JSON string (starting with `{`). Required when using `service_account` (the default).
 - `GDRIVE_FSSPEC_CREDENTIALS_TYPE` — token type (`service_account` default; use `cache` or `browser` for user OAuth).
 - `GDRIVE_FSSPEC_DRIVE` — **Shared Drive name**. Required for service-account upload tests.
+- `GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH` — _optional_. Path to a second service-account JSON with **viewer-only** access to `GDRIVE_FSSPEC_DRIVE`.
 
 Service accounts cannot own files in Google Drive and have no storage quota. Uploads must target a [Shared Drive](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) where the service account is a member with at least **Contributor** access. See [Google's storage-limit errors](https://developers.google.com/workspace/drive/api/guides/handle-errors#storage-limit).
 

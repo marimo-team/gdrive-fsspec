@@ -9,17 +9,19 @@ from conftest import MockedDriveFS, empty_files_list_response, empty_listing
 
 from gdrive_fsspec.core import (
     DIR_MIME_TYPE,
+    INFO_FIELDS,
     ROOT_ID,
     GoogleDriveFile,
     GoogleDriveFileSystem,
     MultipleFilesError,
 )
+from gdrive_fsspec.utils import merge_fields
 
 
 def test_mkdir_creates_folder_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.exists = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value={"id": "parent-id"})
+    fs._path_to_id = mock.Mock(return_value="parent-id")
     mocked_fs.files.create.return_value.execute.return_value = {
         "id": "new-id",
         "name": "newfolder",
@@ -55,18 +57,23 @@ def test_mkdir_creates_folder_and_updates_dircache(mocked_fs: MockedDriveFS) -> 
 
 
 def test_mkdir_raises_when_path_exists(mocked_fs: MockedDriveFS) -> None:
-    mocked_fs.fs.exists = mock.Mock(return_value=True)
-    mocked_fs.fs.info = mock.Mock(return_value={"id": "parent-id"})
+    fs = mocked_fs.fs
+    fs.exists = mock.Mock(return_value=True)
+    fs._path_to_id = mock.Mock(return_value="parent-id")
 
     with pytest.raises(FileExistsError):
-        mocked_fs.fs.mkdir("parent/existing", create_parents=False)
+        fs.mkdir("parent/existing", create_parents=False)
+
+    # The existence check short-circuits before the parent id is resolved.
+    fs._path_to_id.assert_not_called()
+    mocked_fs.files.create.assert_not_called()
 
 
 def test_mkdir_create_parents_calls_makedirs(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.makedirs = mock.Mock()
     fs.exists = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value={"id": "parent-id"})
+    fs._path_to_id = mock.Mock(return_value="parent-id")
     mocked_fs.files.create.return_value.execute.return_value = {
         "id": "new-id",
         "name": "child",
@@ -82,7 +89,7 @@ def test_mkdir_skips_parent_creation_at_root(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.makedirs = mock.Mock()
     fs.exists = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value={"id": "root-id"})
+    fs.root_file_id = "root-id"
     mocked_fs.files.create.return_value.execute.return_value = {
         "id": "new-id",
         "name": "top",
@@ -114,9 +121,14 @@ def test_makedirs_exist_ok_false_raises(mocked_fs: MockedDriveFS) -> None:
         fs.makedirs("a/b", exist_ok=False)
 
 
+def _deletable_info(**extra: Any) -> dict[str, Any]:
+    """A file-info dict for a file the caller is allowed to delete."""
+    return {"id": "file-id", "capabilities": {"canDelete": True}, **extra}
+
+
 def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.info = mock.Mock(return_value=_deletable_info())
     fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
     fs.dircache["parent/file"] = empty_listing()
 
@@ -129,31 +141,76 @@ def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
-def test_rm_normalizes_pathlike_for_dircache(mocked_fs: MockedDriveFS) -> None:
+def test_rm_requests_capabilities_and_drive_id(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value=_deletable_info())
+
+    fs._rm("parent/file")
+
+    # The capability check must be resolved in the same info() call, not a
+    # separate follow-up request.
+    fs.info.assert_called_once_with(
+        "parent/file", fields="driveId,capabilities/canDelete"
+    )
+
+
+def test_rm_no_delete_permission_on_shared_drive_raises_with_role_hint(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        return_value={
+            "id": "file-id",
+            "driveId": "drive-1",
+            "capabilities": {"canDelete": False},
+        }
+    )
+
+    with pytest.raises(PermissionError, match="Manager access"):
+        fs._rm("parent/file")
+
+    # Nothing is deleted when the capability check fails.
+    mocked_fs.files.delete.assert_not_called()
+
+
+def test_rm_no_delete_permission_on_my_drive_omits_shared_drive_advice(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # No driveId → a My Drive file; the shared-drive role hint would mislead.
+    fs.info = mock.Mock(
+        return_value={"id": "file-id", "capabilities": {"canDelete": False}}
+    )
+
+    with pytest.raises(PermissionError) as excinfo:
+        fs._rm("parent/file")
+
+    assert "shared drives" not in str(excinfo.value)
+    mocked_fs.files.delete.assert_not_called()
+
+
+def test_rm_missing_capabilities_treated_as_not_deletable(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # Absent capabilities block deletion rather than risk a masked-404 failure.
     fs.info = mock.Mock(return_value={"id": "file-id"})
-    fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
-    fs.dircache["parent/file"] = empty_listing()
 
-    fs._rm(pathlib.PurePosixPath("parent/file"))
+    with pytest.raises(PermissionError):
+        fs._rm("parent/file")
 
-    mocked_fs.files.delete.assert_called_once_with(
-        fileId="file-id", supportsAllDrives=True
-    )
-    assert fs.dircache["parent"] == []
-    assert "parent/file" not in fs.dircache
+    mocked_fs.files.delete.assert_not_called()
 
 
-def test_rm_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
+def test_rm_missing_file_raises_file_not_found(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock()
+    # info() surfaces a genuinely missing file before the capability check.
+    fs.info = mock.Mock(side_effect=FileNotFoundError("parent/file"))
 
-    fs._rm("parent/file", file_id="explicit-id")
+    with pytest.raises(FileNotFoundError):
+        fs._rm("parent/file")
 
-    mocked_fs.files.delete.assert_called_once_with(
-        fileId="explicit-id", supportsAllDrives=True
-    )
-    fs.info.assert_not_called()
+    mocked_fs.files.delete.assert_not_called()
 
 
 def test_rm_non_empty_folder_without_recursive_raises(
@@ -170,11 +227,21 @@ def test_rm_non_empty_folder_without_recursive_raises(
     mocked_fs.files.delete.assert_not_called()
 
 
+def test_rm_root_raises_value_error(mocked_fs: MockedDriveFS) -> None:
+    # Deleting the root must fail clearly, not with a misleading PermissionError.
+    fs = mocked_fs.fs
+
+    with pytest.raises(ValueError, match="root"):
+        fs._rm("")
+
+    mocked_fs.files.delete.assert_not_called()
+
+
 def test_rm_deletes_file(mocked_fs: MockedDriveFS) -> None:
     # rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.info = mock.Mock(return_value=_deletable_info())
 
     fs.rm("file.txt")
 
@@ -196,7 +263,7 @@ def test_rmdir_deletes_empty_directory(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=[])
-    fs.info = mock.Mock(return_value={"id": "dir-id"})
+    fs.info = mock.Mock(return_value=_deletable_info(id="dir-id"))
 
     fs.rmdir("empty")
 
@@ -228,6 +295,7 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
         file_id: str,
         trashed: bool = False,
         path_prefix: str | None = None,
+        fields: str | None = None,
     ) -> list[dict[str, Any]]:
         if file_id == "root":
             return [
@@ -263,25 +331,33 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
     ]
 
 
-def test_ls_nested_subpath_uses_parent_info(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.info = mock.Mock(return_value={"id": "parent-id", "type": "directory"})
-    anon_fs._list_directory_by_id = mock.Mock(
-        return_value=[
-            {
-                "name": "parent/child.txt",
-                "id": "child-id",
-                "type": "file",
-                "mimeType": "text/plain",
-            }
-        ],
-    )
+def test_ls_nested_file_resolves_via_parent_listing(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    anon_fs.dircache["parent"] = [
+        {
+            "name": "parent/child.txt",
+            "id": "child-id",
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
 
     assert anon_fs.ls("parent/child.txt") == ["parent/child.txt"]
-    anon_fs.info.assert_called_once_with("parent", trashed=False)
 
 
-def test_info_non_root_delegates_to_parent(anon_fs: GoogleDriveFileSystem) -> None:
-    listing = [
+def test_info_honors_fields_after_listing_cache_warmed_without_them(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    """Regression: a warm dircache entry must not satisfy ``info(..., fields=...)``.
+
+    Resolves the file id from the listing cache, then fetches authoritative
+    metadata via ``files.get``. Before the ``info()`` rewrite, a listing cached
+    without ``capabilities`` caused ``info(..., fields="capabilities/canDelete")``
+    to return stale metadata and ``_rm`` to raise a false ``PermissionError``.
+    """
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
         {
             "name": "file.txt",
             "id": "file-id",
@@ -290,33 +366,202 @@ def test_info_non_root_delegates_to_parent(anon_fs: GoogleDriveFileSystem) -> No
             "mimeType": "text/plain",
         }
     ]
-    anon_fs.dircache[""] = listing
+    mocked_fs.files.get.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "file.txt",
+        "mimeType": "text/plain",
+        "size": "3",
+        "capabilities": {"canDelete": True},
+    }
 
-    info = anon_fs.info("file.txt")
+    info = fs.info("file.txt", fields="capabilities/canDelete")
 
+    mocked_fs.files.get.assert_called_once_with(
+        fileId="file-id",
+        fields=merge_fields(INFO_FIELDS, "capabilities/canDelete"),
+        supportsAllDrives=True,
+    )
     assert info == {
         "name": "file.txt",
         "id": "file-id",
         "type": "file",
         "size": 3,
         "mimeType": "text/plain",
+        "capabilities": {"canDelete": True},
     }
 
 
-def test_open_returns_google_drive_file(mocked_fs: MockedDriveFS) -> None:
+def test_info_without_fields_reuses_listing_entry_without_get(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # With no extra fields, the parent listing already carries the full entry,
+    # so info() must not make a per-file files.get request.
     fs = mocked_fs.fs
-    fs.info = mock.Mock(
-        return_value={"id": "file-id", "size": 0, "type": "file", "name": "file.txt"}
+    fs.dircache[""] = [
+        {
+            "name": "file.txt",
+            "id": "file-id",
+            "type": "file",
+            "size": 3,
+            "mimeType": "text/plain",
+        }
+    ]
+
+    info = fs.info("file.txt")
+
+    mocked_fs.files.get.assert_not_called()
+    assert info["id"] == "file-id"
+    assert info["type"] == "file"
+
+
+def test_info_empty_fields_uses_listing_fast_path(mocked_fs: MockedDriveFS) -> None:
+    # A blank mask is equivalent to no extra fields: reuse the listing entry.
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {"name": "file.txt", "id": "file-id", "type": "file", "mimeType": "text/plain"}
+    ]
+
+    info = fs.info("file.txt", fields="")
+
+    mocked_fs.files.get.assert_not_called()
+    assert info["id"] == "file-id"
+
+
+def test_info_ignores_reserved_kwargs_for_files_get(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # Forwarded **kwargs must not collide with the explicit files.get args.
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {"name": "file.txt", "id": "file-id", "type": "file", "mimeType": "text/plain"}
+    ]
+    mocked_fs.files.get.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "file.txt",
+        "mimeType": "text/plain",
+        "driveId": "drive-1",
+    }
+
+    info = fs.info(
+        "file.txt", fields="driveId", supportsAllDrives=False, fileId="bogus"
     )
 
-    opened = fs._open("file.txt", mode="rb")
+    _, kwargs = mocked_fs.files.get.call_args
+    assert kwargs["fileId"] == "file-id"
+    assert kwargs["supportsAllDrives"] is True
+    assert info["driveId"] == "drive-1"
 
-    assert isinstance(opened, GoogleDriveFile)
-    assert opened.path == "file.txt"
+
+def test_ls_non_canonical_bypasses_cache_read_and_write(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    fetched = [{"name": "a", "id": "1", "type": "file", "driveId": "drive-1"}]
+    anon_fs.dircache[""] = [{"name": "a", "id": "1", "type": "file"}]
+    anon_fs._list_directory_by_id = mock.Mock(return_value=fetched)
+
+    result = anon_fs.ls("", detail=True, fields="driveId")
+
+    anon_fs._list_directory_by_id.assert_called_once()
+    assert result[0]["driveId"] == "drive-1"
+    assert "driveId" not in anon_fs.dircache[""][0]
+
+    anon_fs.dircache.clear()
+    anon_fs._list_directory_by_id.reset_mock()
+
+    anon_fs.ls("", detail=True, fields="driveId")
+
+    anon_fs._list_directory_by_id.assert_called_once()
+    assert "" not in anon_fs.dircache
+
+
+def test_ls_fields_without_detail_raises(anon_fs: GoogleDriveFileSystem) -> None:
+    # Requesting fields with detail=False would silently discard them, since the
+    # names-only result carries no metadata. Reject the misuse instead.
+    anon_fs._list_directory_by_id = mock.Mock()
+
+    with pytest.raises(ValueError, match="detail=True"):
+        anon_fs.ls("", fields="driveId")
+
+    anon_fs._list_directory_by_id.assert_not_called()
+
+
+def test_ls_empty_fields_uses_cache(anon_fs: GoogleDriveFileSystem) -> None:
+    # A blank mask must not bypass the cache; it means no extra fields.
+    cached = [{"name": "a", "id": "1", "type": "file"}]
+    anon_fs.dircache[""] = cached
+    anon_fs._list_directory_by_id = mock.Mock()
+
+    result = anon_fs.ls("", detail=True, fields="")
+
+    assert result == cached
+    anon_fs._list_directory_by_id.assert_not_called()
+
+
+def test_ls_skips_cache_when_trashed_requested(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    canonical = [{"name": "a", "id": "1", "type": "file"}]
+    anon_fs.dircache[""] = [dict(entry) for entry in canonical]
+    anon_fs._list_directory_by_id = mock.Mock(
+        return_value=[{"name": "trashed-a", "id": "2", "type": "file", "trashed": True}]
+    )
+
+    result = anon_fs.ls("", detail=True, trashed=True)
+
+    anon_fs._list_directory_by_id.assert_called_once()
+    assert result[0]["name"] == "trashed-a"
+    assert anon_fs.dircache[""] == canonical
+
+
+def test_path_to_id_resolves_from_parent_dircache(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    anon_fs.root_file_id = "root-id"
+    anon_fs.dircache["parent"] = [
+        {
+            "name": "parent/child.txt",
+            "id": "child-id",
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
+
+    assert anon_fs._path_to_id("") == "root-id"
+    assert anon_fs._path_to_id("parent/child.txt") == "child-id"
+
+
+def test_path_to_id_missing_raises_file_not_found(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    anon_fs.dircache["parent"] = [
+        {"name": "parent/other", "id": "other-id", "type": "file"}
+    ]
+    with pytest.raises(FileNotFoundError):
+        anon_fs._path_to_id("parent/child")
+
+
+def test_path_to_id_duplicate_raises_multiple_files_error(
+    anon_fs: GoogleDriveFileSystem,
+) -> None:
+    # Ambiguous resolution must fail, not silently pick one, so callers like the
+    # write path can refuse to overwrite an arbitrary duplicate.
+    anon_fs.dircache["parent"] = [
+        {"name": "parent/dup", "id": "1", "type": "file"},
+        {"name": "parent/dup", "id": "2", "type": "file"},
+    ]
+    with pytest.raises(MultipleFilesError):
+        anon_fs._path_to_id("parent/dup")
+
+
+def test_resolve_entry_rejects_root(anon_fs: GoogleDriveFileSystem) -> None:
+    # Root has no parent to list; callers must handle it before resolving.
+    with pytest.raises(ValueError, match="root"):
+        anon_fs._resolve_entry("")
 
 
 def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
+    fs._path_to_id = mock.Mock(return_value="file-id")
     fs.info = mock.Mock(
         return_value={"id": "file-id", "size": 0, "type": "file", "name": "file.txt"}
     )
@@ -324,9 +569,7 @@ def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None
     opened = GoogleDriveFile(fs, pathlib.PurePosixPath("file.txt"), mode="rb")
 
     assert opened.path == "file.txt"
-    # info must be resolved from the normalized str, never a Path
-    for call in fs.info.call_args_list:
-        assert call.args[0] == "file.txt"
+    fs._path_to_id.assert_called_once_with("file.txt")
 
 
 def test_ls_file_at_root_returns_parent_listing(anon_fs: GoogleDriveFileSystem) -> None:

@@ -5,6 +5,32 @@
 import pytest
 
 from gdrive_fsspec.core import DIR_MIME_TYPE, _finfo_from_response, _normalize_path
+from gdrive_fsspec.utils import merge_fields
+
+
+@pytest.mark.parametrize(
+    "base, extra, expected",
+    [
+        # No extra fields: base is returned unchanged.
+        ("name,id", None, "name,id"),
+        ("name,id", "", "name,id"),
+        # Extra fields are appended.
+        ("name,id", "driveId", "name,id,driveId"),
+        # Duplicate tokens across base and extra are dropped, order preserved.
+        ("name,id,size", "id,driveId", "name,id,size,driveId"),
+        # Surrounding whitespace and empty tokens are stripped.
+        ("name, id ", " id ,driveId", "name,id,driveId"),
+        ("name,id", "driveId,", "name,id,driveId"),
+        # Nested-field selectors are treated as opaque tokens.
+        (
+            "name,id",
+            "capabilities/canDelete",
+            "name,id,capabilities/canDelete",
+        ),
+    ],
+)
+def test_merge_fields(base: str, extra: str | None, expected: str) -> None:
+    assert merge_fields(base, extra) == expected
 
 
 @pytest.mark.parametrize(

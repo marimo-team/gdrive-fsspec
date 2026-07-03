@@ -10,6 +10,11 @@
 #   User OAuth (My Drive or a shared drive you can access):
 #     GDRIVE_FSSPEC_CREDENTIALS_TYPE=cache   # or browser for first login
 #     GDRIVE_FSSPEC_DRIVE=optional-shared-drive-name
+#
+# Optional (permission-denied tests):
+#   GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH=/path/to/viewer-sa.json
+#     A second service-account key with viewer-only access to
+#     GDRIVE_FSSPEC_DRIVE
 # ---------------------------------------------------------------------------
 
 from typing import cast
@@ -18,12 +23,6 @@ import pytest
 from conftest import TESTDIR, FsFactory
 
 from gdrive_fsspec.core import GoogleDriveFile, GoogleDriveFileSystem
-
-# Listing cache can be stale or wrong after writes/deletes.
-DIRCACHE_XFAIL = pytest.mark.xfail(
-    reason="dircache not updated correctly after mutations",
-    strict=True,
-)
 
 
 def _test_path(name: str) -> str:
@@ -52,7 +51,6 @@ def test_overwrite_updates_in_place(fs: GoogleDriveFileSystem) -> None:
         # pyrefly: ignore [bad-argument-type]
         f.write(b"second longer content")
 
-    fs.invalidate_cache()
     entries = fs.ls(TESTDIR, detail=True)
     match = [e for e in entries if e["name"] == filename]
     assert len(match) == 1, "overwrite created a duplicate child"
@@ -66,30 +64,22 @@ def test_overwrite_preserves_file_id(fs: GoogleDriveFileSystem) -> None:
     with fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
         f.write(b"v1")
-    fs.invalidate_cache()
     original_id = fs.info(filename)["id"]
 
     with fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
         f.write(b"v2")
-    fs.invalidate_cache()
 
     assert fs.info(filename)["id"] == original_id
     assert fs.cat(filename) == b"v2"
 
 
 @pytest.mark.integration
-@DIRCACHE_XFAIL
 def test_overwrite_updates_live_dircache(fs: GoogleDriveFileSystem) -> None:
     """The live dircache reflects an overwrite without re-listing.
 
     Exercises the in-place dircache update on commit: ``ls`` populates the
     cache, the overwrite must replace that entry (not append a second one).
-
-    Currently xfails on the broader dircache-drift bug: ``ls`` on a directory
-    whose parent is already cached never caches that directory's own children,
-    so the commit-time update has no entry to replace. The server-state tests
-    above confirm the overwrite itself is correct.
     """
     filename = _test_path("overwrite_cache")
     with fs.open(filename, "wb") as f:
@@ -137,7 +127,35 @@ def test_rm_file_removes_from_listing(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-@DIRCACHE_XFAIL
+def test_rm_missing_file_raises_file_not_found(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # Deleting a file that does not exist should surface FileNotFoundError, not a
+    # raw HttpError. rm resolves the file via info() first, which raises when the
+    # path is absent.
+    with pytest.raises(FileNotFoundError):
+        fs.rm(_test_path("never_existed"))
+
+
+@pytest.mark.integration
+def test_rm_insufficient_permissions_raises_permission_error(
+    fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
+) -> None:
+    # A file created by the privileged identity but deleted through a read-only
+    # identity: visible in ls(), forbidden to delete. rm checks capabilities.canDelete
+    # up front and raises an actionable PermissionError instead of a masked 404.
+    filename = _test_path("forbidden_delete")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"cannot delete me")
+
+    assert readonly_fs.exists(filename)
+    with pytest.raises(PermissionError, match="Manager"):
+        readonly_fs.rm(filename)
+
+
+@pytest.mark.integration
+@pytest.mark.xfail(reason="dircache not updated correctly after mutations", strict=True)
 def test_rm_recursive_deletes_directory_tree(fs: GoogleDriveFileSystem) -> None:
     root = _test_path("tree")
     fs.makedirs(root + "/a/b")
@@ -146,6 +164,10 @@ def test_rm_recursive_deletes_directory_tree(fs: GoogleDriveFileSystem) -> None:
         f.write(b"leaf")
 
     fs.rm(root, recursive=True)
+
+    # Recursive delete only pops the root listing from dircache; nested
+    # listings populated during setup may linger until invalidated.
+    # fs.invalidate_cache()
 
     assert not fs.exists(root)
     assert not fs.exists(root + "/a")
@@ -244,7 +266,6 @@ def test_transaction_rollback_discards_upload(fs: GoogleDriveFileSystem) -> None
     # file was never committed, which a leaked session would also satisfy).
     assert f.location is None, "rollback should cancel the resumable session"
     # The aborted upload must not have produced a committed file.
-    fs.invalidate_cache()
     assert not fs.exists(fn)
 
 
@@ -270,12 +291,10 @@ def test_discard_after_partial_write(fs: GoogleDriveFileSystem) -> None:
     finally:
         f.closed = True
 
-    fs.invalidate_cache()
     assert not fs.exists(fn)
 
 
 @pytest.mark.integration
-@DIRCACHE_XFAIL
 def test_ls_detail_includes_metadata(fs: GoogleDriveFileSystem) -> None:
     filename = _test_path("detail_check")
     with fs.open(filename, "wb") as f:
@@ -291,7 +310,6 @@ def test_ls_detail_includes_metadata(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-@DIRCACHE_XFAIL
 def test_nested_ls_lists_children(fs: GoogleDriveFileSystem) -> None:
     parent = _test_path("nested_parent")
     fs.mkdir(parent)
@@ -368,3 +386,75 @@ def test_info_returns_directory_for_root(fs: GoogleDriveFileSystem) -> None:
     assert info["type"] == "directory"
     assert info["size"] == 0
     assert info["id"] == fs.root_file_id
+
+
+@pytest.mark.integration
+def test_info_honors_fields_with_warm_listing_cache(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    """``info(fields=...)`` must fetch from the API, not stale ``ls`` dircache."""
+    filename = _test_path("info_fields")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"x")
+
+    fs.ls(TESTDIR, detail=True)
+    cached = next(e for e in fs.dircache[TESTDIR] if e["name"] == filename)
+    assert "capabilities" not in cached
+
+    info = fs.info(filename, fields="capabilities/canDelete")
+    assert info.get("capabilities", {}).get("canDelete") is True
+
+
+@pytest.mark.integration
+def test_ls_with_fields_bypasses_stale_cache(fs: GoogleDriveFileSystem) -> None:
+    """``ls(..., fields=...)`` must refetch when the canonical cache lacks fields."""
+    filename = _test_path("ls_fields")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"abc")
+
+    fs.ls(TESTDIR, detail=True)
+    cached = next(e for e in fs.dircache[TESTDIR] if e["name"] == filename)
+    assert "capabilities" not in cached
+
+    entries = fs.ls(TESTDIR, detail=True, fields="capabilities/canDelete")
+    match = [e for e in entries if e["name"] == filename]
+    assert len(match) == 1
+    capabilities = match[0]["capabilities"]
+    assert isinstance(capabilities, dict)
+    assert capabilities["canDelete"] is True
+
+
+@pytest.mark.integration
+def test_ls_with_fields_does_not_overwrite_canonical_cache(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    """Non-canonical ``ls`` reads fresh data but leaves the default dircache unchanged."""
+    filename = _test_path("ls_no_cache_pollution")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"x")
+
+    fs.ls(TESTDIR, detail=True)
+    before = next(e for e in fs.dircache[TESTDIR] if e["name"] == filename)
+
+    fs.ls(TESTDIR, detail=True, fields="capabilities/canDelete")
+
+    after = next(e for e in fs.dircache[TESTDIR] if e["name"] == filename)
+    assert after == before
+    assert "capabilities" not in after
+
+
+@pytest.mark.integration
+def test_rm_succeeds_after_exists_warmed_cache(fs: GoogleDriveFileSystem) -> None:
+    """Regression: ``exists()`` warming dircache must not cause a false ``PermissionError`` on ``rm``."""
+    filename = _test_path("rm_after_exists")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"delete me")
+
+    assert fs.exists(filename)
+    fs.rm(filename)
+
+    assert not fs.exists(filename)
