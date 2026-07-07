@@ -122,39 +122,77 @@ def test_makedirs_exist_ok_false_raises(mocked_fs: MockedDriveFS) -> None:
 
 
 def _deletable_info(**extra: Any) -> dict[str, Any]:
-    """A file-info dict for a file the caller is allowed to delete."""
+    """A file-info dict for a file the caller may permanently delete."""
     return {"id": "file-id", "capabilities": {"canDelete": True}, **extra}
 
 
-def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
+def _trashable_info(**extra: Any) -> dict[str, Any]:
+    """A file-info dict for a file the caller may move to trash."""
+    return {"id": "file-id", "capabilities": {"canTrash": True}, **extra}
+
+
+def test_rm_file_trashes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
+    # rm defaults to trash (files.update trashed=True), matching the Drive UI.
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value=_deletable_info())
+    fs.info = mock.Mock(return_value=_trashable_info())
     fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
     fs.dircache["parent/file"] = empty_listing()
 
     fs.rm_file("parent/file")
 
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="file-id", body={"trashed": True}, supportsAllDrives=True
+    )
+    mocked_fs.files.delete.assert_not_called()
+    assert fs.dircache["parent"] == []
+    assert "parent/file" not in fs.dircache
+
+
+def test_rm_permanent_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
+    # permanent=True hard-deletes via files.delete instead of trashing.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value=_deletable_info())
+    fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
+    fs.dircache["parent/file"] = empty_listing()
+
+    fs.rm("parent/file", permanent=True)
+
     mocked_fs.files.delete.assert_called_once_with(
         fileId="file-id", supportsAllDrives=True
     )
+    mocked_fs.files.update.assert_not_called()
     assert fs.dircache["parent"] == []
     assert "parent/file" not in fs.dircache
 
 
 def test_rm_requests_capabilities_and_drive_id(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value=_deletable_info())
+    fs.info = mock.Mock(return_value=_trashable_info())
 
     fs._rm("parent/file")
 
-    # The capability check must be resolved in the same info() call, not a
+    # Both capability signals must be resolved in the same info() call, not a
     # separate follow-up request.
     fs.info.assert_called_once_with(
-        "parent/file", fields="driveId,capabilities/canDelete"
+        "parent/file",
+        fields="driveId,capabilities/canDelete,capabilities/canTrash",
     )
 
 
-def test_rm_no_delete_permission_on_shared_drive_raises_with_role_hint(
+def test_rm_no_trash_permission_raises(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        return_value={"id": "file-id", "capabilities": {"canTrash": False}}
+    )
+
+    with pytest.raises(PermissionError, match="Trash"):
+        fs._rm("parent/file")
+
+    # Nothing is trashed when the capability check fails.
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_rm_permanent_no_delete_permission_on_shared_drive_raises_with_role_hint(
     mocked_fs: MockedDriveFS,
 ) -> None:
     fs = mocked_fs.fs
@@ -167,13 +205,13 @@ def test_rm_no_delete_permission_on_shared_drive_raises_with_role_hint(
     )
 
     with pytest.raises(PermissionError, match="Manager access"):
-        fs._rm("parent/file")
+        fs._rm("parent/file", permanent=True)
 
     # Nothing is deleted when the capability check fails.
     mocked_fs.files.delete.assert_not_called()
 
 
-def test_rm_no_delete_permission_on_my_drive_omits_shared_drive_advice(
+def test_rm_permanent_no_delete_permission_on_my_drive_omits_shared_drive_advice(
     mocked_fs: MockedDriveFS,
 ) -> None:
     fs = mocked_fs.fs
@@ -183,13 +221,13 @@ def test_rm_no_delete_permission_on_my_drive_omits_shared_drive_advice(
     )
 
     with pytest.raises(PermissionError) as excinfo:
-        fs._rm("parent/file")
+        fs._rm("parent/file", permanent=True)
 
     assert "shared drives" not in str(excinfo.value)
     mocked_fs.files.delete.assert_not_called()
 
 
-def test_rm_missing_capabilities_treated_as_not_deletable(
+def test_rm_permanent_missing_capabilities_treated_as_not_deletable(
     mocked_fs: MockedDriveFS,
 ) -> None:
     fs = mocked_fs.fs
@@ -197,7 +235,7 @@ def test_rm_missing_capabilities_treated_as_not_deletable(
     fs.info = mock.Mock(return_value={"id": "file-id"})
 
     with pytest.raises(PermissionError):
-        fs._rm("parent/file")
+        fs._rm("parent/file", permanent=True)
 
     mocked_fs.files.delete.assert_not_called()
 
@@ -211,6 +249,7 @@ def test_rm_missing_file_raises_file_not_found(mocked_fs: MockedDriveFS) -> None
         fs._rm("parent/file")
 
     mocked_fs.files.delete.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
 
 
 def test_rm_non_empty_folder_without_recursive_raises(
@@ -225,6 +264,7 @@ def test_rm_non_empty_folder_without_recursive_raises(
 
     # The guard must fire before any Drive delete is issued.
     mocked_fs.files.delete.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
 
 
 def test_rm_root_raises_value_error(mocked_fs: MockedDriveFS) -> None:
@@ -235,18 +275,19 @@ def test_rm_root_raises_value_error(mocked_fs: MockedDriveFS) -> None:
         fs._rm("")
 
     mocked_fs.files.delete.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
 
 
-def test_rm_deletes_file(mocked_fs: MockedDriveFS) -> None:
-    # rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
+def test_rm_trashes_file(mocked_fs: MockedDriveFS) -> None:
+    # rm -> _rm (our override) -> files.update (trash by default).
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=False)
-    fs.info = mock.Mock(return_value=_deletable_info())
+    fs.info = mock.Mock(return_value=_trashable_info())
 
     fs.rm("file.txt")
 
-    mocked_fs.files.delete.assert_called_once_with(
-        fileId="file-id", supportsAllDrives=True
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="file-id", body={"trashed": True}, supportsAllDrives=True
     )
 
 
@@ -258,18 +299,33 @@ def test_rmdir_requires_directory(mocked_fs: MockedDriveFS) -> None:
         fs.rmdir("file.txt")
 
 
-def test_rmdir_deletes_empty_directory(mocked_fs: MockedDriveFS) -> None:
-    # rmdir -> rm -> rm_file (fsspec base) -> _rm (our override) -> files.delete.
+def test_rmdir_trashes_empty_directory(mocked_fs: MockedDriveFS) -> None:
+    # rmdir -> rm -> _rm (our override) -> files.update (trash by default).
+    fs = mocked_fs.fs
+    fs.isdir = mock.Mock(return_value=True)
+    fs.ls = mock.Mock(return_value=[])
+    fs.info = mock.Mock(return_value=_trashable_info(id="dir-id"))
+
+    fs.rmdir("empty")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="dir-id", body={"trashed": True}, supportsAllDrives=True
+    )
+
+
+def test_rmdir_permanent_forwards_flag(mocked_fs: MockedDriveFS) -> None:
+    # permanent=True must thread through rmdir -> rm -> _rm to files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=[])
     fs.info = mock.Mock(return_value=_deletable_info(id="dir-id"))
 
-    fs.rmdir("empty")
+    fs.rmdir("empty", permanent=True)
 
     mocked_fs.files.delete.assert_called_once_with(
         fileId="dir-id", supportsAllDrives=True
     )
+    mocked_fs.files.update.assert_not_called()
 
 
 def test_ls_from_dircache_returns_sorted_names(

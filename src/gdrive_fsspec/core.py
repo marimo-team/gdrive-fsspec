@@ -62,15 +62,19 @@ INFO_FIELDS = ",".join(_BASE_FIELDS)
 # Shared-drive role docs, surfaced in permission errors on delete/trash.
 _SHARED_DRIVE_ROLES_URL = "https://support.google.com/a/answer/7337554"
 # https://developers.google.com/workspace/drive/api/guides/delete#permissions for more info.
-_TRASH_PERMISSION_MSG = (
-    "Insufficient permissions to move the file into Trash. On shared drives you "
-    f"need Manager or Content manager access. See {_SHARED_DRIVE_ROLES_URL}"
+
+_TRASH_PERMISSION_MSG = "Insufficient permissions to move the file into Trash."
+_TRASH_PERMISSION_SHARED_DRIVE_MSG = (
+    "Insufficient permissions to move the file into Trash. Shared drives require "
+    f"Content manager or Manager access. See {_SHARED_DRIVE_ROLES_URL}"
 )
 _DELETE_PERMISSION_SHARED_DRIVE_MSG = (
-    "Insufficient permissions to permanently delete the file. On shared drives "
-    f"you need Manager access. See {_SHARED_DRIVE_ROLES_URL}"
+    "Insufficient permissions to permanently delete the file. Shared drives require "
+    f"Manager access. See {_SHARED_DRIVE_ROLES_URL}"
 )
 _DELETE_PERMISSION_MSG = "Insufficient permissions to permanently delete the file."
+
+_NUM_RETRIES = 2
 
 
 def _normalize_path(prefix: str, name: str) -> str:
@@ -467,31 +471,42 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     # We overwrite the base class _rm's method instead of rm_file because rm_file expects a "Never" return
     @override
-    def _rm(self, path: PathLike) -> None:
+    def _rm(self, path: PathLike, permanent: bool = False) -> None:
         """Delete a single file or directory by path.
 
         Args:
             path: Path of the file or folder to delete.
+            permanent: If True, permanently delete the file instead of moving to trash.
         """
         stripped_path = self._path_str(path)
         if stripped_path == "":
             raise ValueError("Cannot delete the filesystem root")
-        file_info = self.info(stripped_path, fields="driveId,capabilities/canDelete")
+        file_info = self.info(
+            stripped_path, fields="driveId,capabilities/canDelete,capabilities/canTrash"
+        )
         file_id = file_info["id"]
         LOGGER.debug(f"Removing {stripped_path}, file_id={file_id}")
+
+        on_shared_drive = bool(file_info.get("driveId"))
 
         # Sometimes, the file exists but delete reports a 404 error.
         # This is due to a permission issue rather than a file not found error.
         # https://github.com/Light2Dark/gdrive-fsspec/issues/19
         # So we check whether we can delete it first.
-        can_delete = file_info.get("capabilities", {}).get("canDelete", False)
-        on_shared_drive = bool(file_info.get("driveId"))
-        if not can_delete and on_shared_drive:
-            raise PermissionError(_DELETE_PERMISSION_SHARED_DRIVE_MSG)
-        elif not can_delete:
-            raise PermissionError(_DELETE_PERMISSION_MSG)
-
-        self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
+        if permanent:
+            can_delete = file_info.get("capabilities", {}).get("canDelete", False)
+            if not can_delete and on_shared_drive:
+                raise PermissionError(_DELETE_PERMISSION_SHARED_DRIVE_MSG)
+            elif not can_delete:
+                raise PermissionError(_DELETE_PERMISSION_MSG)
+            self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
+        else:
+            can_trash = file_info.get("capabilities", {}).get("canTrash", False)
+            if not can_trash and on_shared_drive:
+                raise PermissionError(_TRASH_PERMISSION_SHARED_DRIVE_MSG)
+            elif not can_trash:
+                raise PermissionError(_TRASH_PERMISSION_MSG)
+            self._trash_file(file_id)
 
         parent = self._parent(stripped_path)
         if parent in self.dircache:
@@ -505,35 +520,45 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @override
     def rm(
-        self, path: PathLike, recursive: bool = True, maxdepth: int | None = None
+        self,
+        path: PathLike,
+        recursive: bool = True,
+        maxdepth: int | None = None,
+        permanent: bool = False,
     ) -> None:
         """Delete a file or directory.
+
+        By default the file is moved to the trash, matching the Google Drive UI
+        (and recoverable from there). Pass ``permanent=True`` to hard-delete.
 
         Args:
             path: Path of the file or folder to delete.
             recursive: If False, refuse to delete a non-empty directory.
             maxdepth: Ignored; accepted for fsspec compatibility.
+            permanent: If True, permanently delete instead of moving to trash.
+                This is irreversible and, on shared drives, requires Manager-level permissions.
 
         Raises:
             ValueError: If ``recursive`` is False and the directory is not empty.
         """
         if recursive is False and self.isdir(path) and self.ls(path):
             raise ValueError("Attempt to delete non-empty folder")
-        self.rm_file(path)
+        self._rm(path, permanent=permanent)
 
     @override
-    def rmdir(self, path: PathLike) -> None:
+    def rmdir(self, path: PathLike, permanent: bool = False) -> None:
         """Remove an empty directory.
 
         Args:
             path: Path of the directory to remove.
+            permanent: If True, permanently delete instead of moving to trash.
 
         Raises:
             ValueError: If ``path`` is not a directory or is not empty.
         """
         if not self.isdir(path):
             raise ValueError("Path is not a directory")
-        self.rm(path, recursive=False)
+        self.rm(path, recursive=False, permanent=permanent)
 
     @override
     def invalidate_cache(self, path: PathLike | None = None) -> None:
@@ -814,6 +839,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if len(matches) == 0:
             raise FileNotFoundError(stripped_path)
         if len(matches) > 1:
+            # if trashed:
+            #     # Choose the un-trashed file first
+            #     untrashed_files = [
+            #         file for file in matches if not file.get("trashed", False)
+            #     ]
+            #     if len(untrashed_files) == 1:
+            #         return untrashed_files[0]
             raise MultipleFilesError(stripped_path)
         return matches[0]
 
@@ -881,6 +913,20 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             if page_token is None:
                 break
         return all_files
+
+    def _trash_file(self, file_id: str, untrash: bool = False) -> File:
+        """Trash or untrash a file.
+
+        Args:
+            file_id: The ID of the file to trash or untrash.
+            untrash: If True, untrash the file.
+        """
+        response = self.files.update(
+            fileId=file_id,
+            body={"trashed": not untrash},
+            supportsAllDrives=True,
+        ).execute(num_retries=_NUM_RETRIES)
+        return response
 
     @override
     def _open(
@@ -1063,7 +1109,8 @@ class GoogleDriveFile(AbstractBufferedFile):
         )
         status = int(response["status"])
         if status >= 400:
-            raise IOError(f"Chunk upload failed with status {status}")
+            error_message = body.decode()
+            raise IOError(f"Chunk upload failed: {error_message}")
         if status in [200, 201]:
             # server thinks we are finished - this should happen
             # only when closing
