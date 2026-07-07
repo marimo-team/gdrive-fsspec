@@ -469,6 +469,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             elif i == len(parts) - 1 and not exist_ok:
                 raise FileExistsError(path)
 
+    # fsspec's base rm_file delegates to _rm; we implement delete here so both
+    # rm_file and rm share the same Drive trash/permanent behavior.
     @override
     def _rm(self, path: PathLike, permanent: bool = False) -> None:
         """Delete a single file or directory by path.
@@ -518,21 +520,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         # Drop any cached listing rooted at the deleted path (it was a directory).
         self.dircache.pop(stripped_path, None)
-
-    @override
-    # pyrefly: ignore [bad-override]  # fsspec stubs rm_file as -> Never
-    def rm_file(self, path: PathLike, *, permanent: bool = False) -> None:
-        """Delete a single file by path.
-
-        By default the file is moved to the trash, matching the Google Drive UI
-        (and recoverable from there). Pass ``permanent=True`` to hard-delete.
-
-        Args:
-            path: Path of the file to delete.
-            permanent: If True, permanently delete instead of moving to trash.
-                This is irreversible, refer to https://developers.google.com/workspace/drive/api/guides/delete#permissions for permissions needed.
-        """
-        self._rm(path, permanent=permanent)
 
     @override
     def rm(
