@@ -488,7 +488,23 @@ def test_upload_chunk_unexpected_status_raises(mocked_fs: MockedDriveFS) -> None
     file.write(b"data")
     file.offset = 0
 
-    with pytest.raises(IOError):
+    with pytest.raises(IOError, match=r"Chunk upload failed \(HTTP 500\): error"):
+        try:
+            file._upload_chunk(final=False)
+        finally:
+            file.closed = True
+
+
+def test_upload_chunk_error_non_utf8_body_raises_ioerror(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    mocked_fs.files._http.request.return_value = ({"status": "503"}, b"\xff\xfe")
+    file = _write_file(fs)
+    file.write(b"data")
+    file.offset = 0
+
+    with pytest.raises(IOError, match=r"Chunk upload failed \(HTTP 503\)"):
         try:
             file._upload_chunk(final=False)
         finally:

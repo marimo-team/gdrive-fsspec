@@ -115,10 +115,6 @@ def test_create_directory(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason="calling info will get both trashed and deleted files, which breaks info",
-    strict=True,
-)
 def test_rm_file_trashes_by_default(fs: GoogleDriveFileSystem) -> None:
     # rm defaults to trashing: the file leaves the default listing but is
     # recoverable and still resolvable with trashed=True.

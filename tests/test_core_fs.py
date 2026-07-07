@@ -148,6 +148,25 @@ def test_rm_file_trashes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
+def test_rm_file_permanent_deletes_and_updates_dircache(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # permanent=True hard-deletes via files.delete instead of trashing.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value=_deletable_info())
+    fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
+    fs.dircache["parent/file"] = empty_listing()
+
+    fs.rm_file("parent/file", permanent=True)
+
+    mocked_fs.files.delete.assert_called_once_with(
+        fileId="file-id", supportsAllDrives=True
+    )
+    mocked_fs.files.update.assert_not_called()
+    assert fs.dircache["parent"] == []
+    assert "parent/file" not in fs.dircache
+
+
 def test_rm_permanent_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     # permanent=True hard-deletes via files.delete instead of trashing.
     fs = mocked_fs.fs
@@ -314,7 +333,7 @@ def test_rmdir_trashes_empty_directory(mocked_fs: MockedDriveFS) -> None:
 
 
 def test_rmdir_permanent_forwards_flag(mocked_fs: MockedDriveFS) -> None:
-    # permanent=True must thread through rmdir -> rm -> _rm to files.delete.
+    # permanent=True must thread through rmdir -> rm -> rm_file to files.delete.
     fs = mocked_fs.fs
     fs.isdir = mock.Mock(return_value=True)
     fs.ls = mock.Mock(return_value=[])

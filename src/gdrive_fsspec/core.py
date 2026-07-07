@@ -469,7 +469,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             elif i == len(parts) - 1 and not exist_ok:
                 raise FileExistsError(path)
 
-    # We overwrite the base class _rm's method instead of rm_file because rm_file expects a "Never" return
     @override
     def _rm(self, path: PathLike, permanent: bool = False) -> None:
         """Delete a single file or directory by path.
@@ -499,7 +498,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 raise PermissionError(_DELETE_PERMISSION_SHARED_DRIVE_MSG)
             elif not can_delete:
                 raise PermissionError(_DELETE_PERMISSION_MSG)
-            self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
+            self.files.delete(fileId=file_id, supportsAllDrives=True).execute(
+                num_retries=_NUM_RETRIES
+            )
         else:
             can_trash = file_info.get("capabilities", {}).get("canTrash", False)
             if not can_trash and on_shared_drive:
@@ -519,6 +520,21 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.dircache.pop(stripped_path, None)
 
     @override
+    # pyrefly: ignore [bad-override]  # fsspec stubs rm_file as -> Never
+    def rm_file(self, path: PathLike, *, permanent: bool = False) -> None:
+        """Delete a single file by path.
+
+        By default the file is moved to the trash, matching the Google Drive UI
+        (and recoverable from there). Pass ``permanent=True`` to hard-delete.
+
+        Args:
+            path: Path of the file to delete.
+            permanent: If True, permanently delete instead of moving to trash.
+                This is irreversible, refer to https://developers.google.com/workspace/drive/api/guides/delete#permissions for permissions needed.
+        """
+        self._rm(path, permanent=permanent)
+
+    @override
     def rm(
         self,
         path: PathLike,
@@ -536,7 +552,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             recursive: If False, refuse to delete a non-empty directory.
             maxdepth: Ignored; accepted for fsspec compatibility.
             permanent: If True, permanently delete instead of moving to trash.
-                This is irreversible and, on shared drives, requires Manager-level permissions.
+                This is irreversible, refer to https://developers.google.com/workspace/drive/api/guides/delete#permissions for permissions.
 
         Raises:
             ValueError: If ``recursive`` is False and the directory is not empty.
@@ -781,6 +797,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         # A blank mask means "no extra fields".
         fields = (fields or "").strip() or None
+
+        # info_by_id fetches fresh data, but involves an extra API call.
+        # resolve_entry uses the cache, but doesn't fetch extra fields.
         if fields is None:
             file_info = self._resolve_entry(stripped_path, trashed=trashed)
         else:
@@ -839,13 +858,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if len(matches) == 0:
             raise FileNotFoundError(stripped_path)
         if len(matches) > 1:
-            # if trashed:
-            #     # Choose the un-trashed file first
-            #     untrashed_files = [
-            #         file for file in matches if not file.get("trashed", False)
-            #     ]
-            #     if len(untrashed_files) == 1:
-            #         return untrashed_files[0]
             raise MultipleFilesError(stripped_path)
         return matches[0]
 
@@ -1109,8 +1121,8 @@ class GoogleDriveFile(AbstractBufferedFile):
         )
         status = int(response["status"])
         if status >= 400:
-            error_message = body.decode()
-            raise IOError(f"Chunk upload failed: {error_message}")
+            error_message = body.decode("utf-8", errors="replace")
+            raise IOError(f"Chunk upload failed (HTTP {status}): {error_message}")
         if status in [200, 201]:
             # server thinks we are finished - this should happen
             # only when closing
