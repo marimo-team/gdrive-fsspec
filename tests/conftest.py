@@ -123,7 +123,7 @@ def make_fs() -> Generator[FsFactory, None, None]:
         primary = created[0]
         if primary.exists(TESTDIR):
             try:
-                primary.rm(TESTDIR, recursive=True)
+                primary.rm(TESTDIR, recursive=True, permanent=True)
             except IOError:
                 pass
 
@@ -133,7 +133,7 @@ def fs(make_fs: FsFactory) -> GoogleDriveFileSystem:
     """A single live filesystem with a fresh ``TESTDIR`` already created."""
     instance = make_fs()
     if instance.exists(TESTDIR):
-        instance.rm(TESTDIR, recursive=True)
+        instance.rm(TESTDIR, recursive=True, permanent=True)
     instance.mkdir(TESTDIR, create_parents=True)
     return instance
 

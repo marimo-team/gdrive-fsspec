@@ -115,7 +115,9 @@ def test_create_directory(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-def test_rm_file_removes_from_listing(fs: GoogleDriveFileSystem) -> None:
+def test_rm_file_trashes_by_default(fs: GoogleDriveFileSystem) -> None:
+    # rm defaults to trashing: the file leaves the default listing but is
+    # recoverable and still resolvable with trashed=True.
     filename = _test_path("to_delete")
     with fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
@@ -124,6 +126,23 @@ def test_rm_file_removes_from_listing(fs: GoogleDriveFileSystem) -> None:
     assert fs.exists(filename)
     fs.rm(filename)
     assert not fs.exists(filename)
+    # Trashed, not purged: it is still findable when trashed items are included.
+    assert fs.info(filename, trashed=True)["trashed"] is True
+
+
+@pytest.mark.integration
+def test_rm_permanent_removes_file(fs: GoogleDriveFileSystem) -> None:
+    # permanent=True hard-deletes: the file is gone even from trashed listings.
+    filename = _test_path("to_purge")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"gone for good")
+
+    assert fs.exists(filename)
+    fs.rm(filename, permanent=True)
+    assert not fs.exists(filename)
+    with pytest.raises(FileNotFoundError):
+        fs.info(filename, trashed=True)
 
 
 @pytest.mark.integration
@@ -138,12 +157,28 @@ def test_rm_missing_file_raises_file_not_found(
 
 
 @pytest.mark.integration
-def test_rm_insufficient_permissions_raises_permission_error(
+def test_rm_insufficient_trash_permissions_raises_permission_error(
     fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
 ) -> None:
     # A file created by the privileged identity but deleted through a read-only
-    # identity: visible in ls(), forbidden to delete. rm checks capabilities.canDelete
+    # identity: visible in ls(), forbidden to trash. rm checks capabilities.canTrash
     # up front and raises an actionable PermissionError instead of a masked 404.
+    filename = _test_path("forbidden_trash")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"cannot trash me")
+
+    assert readonly_fs.exists(filename)
+    with pytest.raises(PermissionError, match="Trash"):
+        readonly_fs.rm(filename)
+
+
+@pytest.mark.integration
+def test_rm_permanent_insufficient_permissions_raises_permission_error(
+    fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
+) -> None:
+    # permanent=True checks capabilities.canDelete and raises an actionable
+    # PermissionError (mentioning Manager access) instead of a masked 404.
     filename = _test_path("forbidden_delete")
     with fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
@@ -151,7 +186,7 @@ def test_rm_insufficient_permissions_raises_permission_error(
 
     assert readonly_fs.exists(filename)
     with pytest.raises(PermissionError, match="Manager"):
-        readonly_fs.rm(filename)
+        readonly_fs.rm(filename, permanent=True)
 
 
 @pytest.mark.integration
