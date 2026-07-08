@@ -5,15 +5,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Light2Dark/gdrive-fsspec/actions/workflows/ci.yaml"><img src="https://github.com/Light2Dark/gdrive-fsspec/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
-  <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/v/gdrive-fsspec.svg" alt="PyPI"></a>
-  <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/pyversions/gdrive-fsspec.svg" alt="Python versions"></a>
-  <a href="https://github.com/Light2Dark/gdrive-fsspec/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Light2Dark/gdrive-fsspec.svg" alt="license"></a>
+  <a href="https://github.com/marimo-team/gdrive-fsspec/actions/workflows/ci.yaml"><img src="https://github.com/marimo-team/gdrive-fsspec/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <!-- <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/v/gdrive-fsspec.svg" alt="PyPI"></a> -->
+  <!-- <a href="https://pypi.org/project/gdrive-fsspec/"><img src="https://img.shields.io/pypi/pyversions/gdrive-fsspec.svg" alt="Python versions"></a> -->
+  <a href="https://github.com/marimo-team/gdrive-fsspec/blob/master/LICENSE"><img src="https://img.shields.io/github/license/marimo-team/gdrive-fsspec.svg" alt="license"></a>
 </p>
 
 <p align="center">
   <a href="https://filesystem-spec.readthedocs.io/en/latest/usage.html"><strong>fsspec docs</strong></a> ·
-  <a href="https://github.com/Light2Dark/gdrive-fsspec/blob/master/CONTRIBUTING.md"><strong>contributing</strong></a>
+  <a href="https://github.com/marimo-team/gdrive-fsspec/blob/master/CONTRIBUTING.md"><strong>contributing</strong></a>
 </p>
 
 ---
@@ -23,7 +23,8 @@
 ## Quickstart
 
 ```sh
-pip install gdrive_fsspec
+# Currently, you need to install from the GitHub repository, there is no PyPI package yet.
+pip install git+https://github.com/marimo-team/gdrive-fsspec
 ```
 
 ```python
@@ -95,8 +96,7 @@ See the ``GoogleDriveFileSystem`` docstring for `root_file_id`, `access`, `space
 ## Installation
 
 ```sh
-pip install gdrive_fsspec
-pip install git+https://github.com/Light2Dark/gdrive-fsspec
+pip install git+https://github.com/marimo-team/gdrive-fsspec
 ```
 
 ## Contributing
