@@ -42,7 +42,7 @@ dev = [
 ]
 
 [project.urls]
-Source = "http://github.com/marimo-team/gdrive-fsspec"
+Source = "https://github.com/marimo-team/gdrive-fsspec"
 Contributing = "https://github.com/marimo-team/gdrive-fsspec/blob/main/CONTRIBUTING.md"
 
 [tool.setuptools_scm]

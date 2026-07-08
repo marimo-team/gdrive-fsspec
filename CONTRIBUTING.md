@@ -70,25 +70,34 @@ Integration tests use a real Google Drive account and a directory named `gdrive_
 uv run pytest -v -m integration
 ```
 
+By default, the tests trigger a browser login to authenticate. However, you can also use service-account credentials. 
+
+Hence, we dedicate a **profile** to each method of testing. Each profile targets a different drive and has different roles. Any profile whose variables are unset is skipped, so you can run a subset locally.
+
+| Profile | Auth | Target | Access | Exercises |
+| --- | --- | --- | --- | --- |
+| `full_access` | service account | shared drive | Manager | Full CRUD (the default `fs` fixture when a key is set) |
+| `content_manager` | service account | shared drive | Content manager | Trash allowed; permanent delete denied |
+| `readonly` | service account | shared drive | Viewer | Reads allowed; all mutations denied |
+| `sa_my_drive` | service account | _none_ (SA My Drive) | — | No quota; uploads must fail |
+| `user` | user OAuth | My Drive | user | Full CRUD as a real user (the default `fs` fixture when no key is set) |
+
 Set these environment variables before running them:
 
-- `GDRIVE_FSSPEC_CREDENTIALS_PATH` — path to a service-account JSON, or the JSON string (starting with `{`). Required when using `service_account` (the default).
-- `GDRIVE_FSSPEC_CREDENTIALS_TYPE` — token type (`service_account` default; use `cache` or `browser` for user OAuth).
-- `GDRIVE_FSSPEC_DRIVE` — **Shared Drive name**. Required for service-account upload tests.
-- `GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH` — _optional_. Path to a second service-account JSON with **viewer-only** access to `GDRIVE_FSSPEC_DRIVE`.
+- `GDRIVE_FSSPEC_CREDENTIALS_PATH` — path to a service-account JSON, or the JSON string (starting with `{`). Shared by every service-account profile. **Its presence also picks the default `fs`/`make_fs` identity:** set → full-access service account; unset → OAuth user.
+- `GDRIVE_FSSPEC_DRIVE_FULL_ACCESS` — **Shared Drive** (name or ID) where the service account has **Manager** access.
+- `GDRIVE_FSSPEC_DRIVE_CONTENT_MANAGER` — _optional_. Shared Drive where the service account has **Content manager** access.
+- `GDRIVE_FSSPEC_DRIVE_READONLY` — _optional_. Shared Drive where the service account has **Viewer** access. Add a file to it manually to exercise the trash-denied path.
+
+<p align="center">
+  <img src="assets/shared-drives.png" alt="Configuring shared drives in Google Drive UI" width="600">
+</p>
+
+The `sa_my_drive` profile needs no extra variables (it reuses the key with no shared drive).
+
+To run tests with browser authentication, run `GDRIVE_FSSPEC_FORCE_BROWSER=1 uv run pytest -v -m integration`.
 
 Service accounts cannot own files in Google Drive and have no storage quota. Uploads must target a [Shared Drive](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) where the service account is a member with at least **Contributor** access. See [Google's storage-limit errors](https://developers.google.com/workspace/drive/api/guides/handle-errors#storage-limit).
-
-For a personal Drive (no Shared Drive), use user OAuth instead: `GDRIVE_FSSPEC_CREDENTIALS_TYPE=cache` after a one-time `browser` login.
-
-To run **all** tests (unit + integration), override the default marker filter:
-
-```sh
-uv run pytest -v -m ""
-```
-
-> **Note:** Integration tests do not run on PRs from forks, because those workflows cannot use repository secrets. They run on pushes to `main` and same-repo PRs. Google Drive has no good emulator; see [this discussion](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
-
 
 ### Creating a service account
 
