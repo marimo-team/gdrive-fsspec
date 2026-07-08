@@ -13,9 +13,9 @@ body:
       label: Initial Checks
       description: Just making sure we're on the same page.
       options:
-        - label: I'm using the [latest version](https://github.com/Light2Dark/gdrive_fsspec/releases/latest) of gdrive_fsspec
+        - label: I'm using the [latest version](https://github.com/marimo-team/gdrive-fsspec/releases/latest) of gdrive_fsspec
           required: true
-        - label: I've searched for my issue in [the issue tracker](https://github.com/Light2Dark/gdrive_fsspec/issues) before opening this issue
+        - label: I've searched for my issue in [the issue tracker](https://github.com/marimo-team/gdrive-fsspec/issues) before opening this issue
           required: true
   - type: textarea
     id: description

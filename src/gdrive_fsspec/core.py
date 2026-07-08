@@ -492,7 +492,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         # Sometimes, the file exists but delete reports a 404 error.
         # This is due to a permission issue rather than a file not found error.
-        # https://github.com/Light2Dark/gdrive-fsspec/issues/19
+        # https://github.com/marimo-team/gdrive-fsspec/issues/19
         # So we check whether we can delete it first.
         if permanent:
             can_delete = file_info.get("capabilities", {}).get("canDelete", False)
