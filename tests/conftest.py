@@ -85,9 +85,11 @@ _CREDS_ENV = "GDRIVE_FSSPEC_CREDENTIALS_PATH"
 class DriveProfile:
     """A named credential/target combination for live integration tests.
 
-    The ``writable``/``can_trash``/``can_permanent_delete`` flags describe the
-    access level the profile is expected to have; fixtures use them to pick a
-    safe teardown strategy and tests use them to assert permission boundaries.
+    The ``writable``/``can_trash``/``can_permanent_delete`` flags are
+    informational: they document the access level each profile is expected to
+    have (and mirror the permission boundaries asserted by the profile-specific
+    tests). They are not consumed programmatically yet; teardown removes
+    ``TESTDIR`` with a permanent-then-trash fallback that works for any role.
     """
 
     id: str
@@ -349,5 +351,6 @@ def sa_my_drive_fs(fs_factory: ProfiledFactory) -> GoogleDriveFileSystem:
 @pytest.fixture()
 def requires_shared_drive() -> None:
     """Skip when no full-access shared drive is configured."""
-    if not _drive_value(PROFILES[FULL_ACCESS]):
+    drive = _drive_value(PROFILES[FULL_ACCESS])
+    if not drive or not drive.strip():
         pytest.skip("full-access shared drive not configured")
