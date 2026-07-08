@@ -8,6 +8,7 @@ import pytest
 from conftest import MockedDriveFS, empty_files_list_response, empty_listing
 
 from gdrive_fsspec.core import (
+    _NUM_RETRIES,
     DIR_MIME_TYPE,
     INFO_FIELDS,
     ROOT_ID,
@@ -671,6 +672,17 @@ def test_list_directory_by_id_paginates(mocked_fs: MockedDriveFS) -> None:
     assert mocked_fs.files.list.call_args_list[1].kwargs["pageToken"] == "page-2"
 
 
+def test_list_directory_by_id_passes_num_retries(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    list_request = mock.Mock()
+    list_request.execute.return_value = empty_files_list_response()
+    mocked_fs.files.list.return_value = list_request
+
+    fs._list_directory_by_id("folder-id")
+
+    list_request.execute.assert_called_once_with(num_retries=_NUM_RETRIES)
+
+
 def test_list_directory_by_id_shared_drive_root_query(
     mocked_fs: MockedDriveFS,
 ) -> None:
@@ -749,7 +761,8 @@ def test_export_streams_via_export_media(mocked_fs: MockedDriveFS) -> None:
         # Two chunks, then done; second next_chunk reports completion.
         chunks = iter([b"expo", b"rted"])
 
-        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
+        def next_chunk(**kwargs: Any) -> tuple[mock.Mock, bool]:
+            assert kwargs.get("num_retries") == _NUM_RETRIES
             buffer.write(next(chunks))
             done = buffer.getvalue() == b"exported"
             return mock.Mock(), done
