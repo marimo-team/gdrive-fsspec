@@ -108,3 +108,4 @@ uv.lock
 
 /src/gdrive_fsspec/_version.py
 /tmp/*
+.DS_Store

@@ -3,24 +3,32 @@
 #
 # Run: uv run pytest -v -m integration
 #
-# Auth (pick one):
-#   Service account (CI default):
-#     GDRIVE_FSSPEC_CREDENTIALS_PATH=/path/to/sa.json
-#     GDRIVE_FSSPEC_DRIVE=your-shared-drive-name
-#   User OAuth (My Drive or a shared drive you can access):
-#     GDRIVE_FSSPEC_CREDENTIALS_TYPE=cache   # or browser for first login
-#     GDRIVE_FSSPEC_DRIVE=optional-shared-drive-name
+# Each profile targets a different drive and has different roles.
+# Any profile whose variables are unset is skipped, so you can run a subset locally.
 #
-# Optional (permission-denied tests):
-#   GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH=/path/to/viewer-sa.json
-#     A second service-account key with viewer-only access to
-#     GDRIVE_FSSPEC_DRIVE
+#   Service-account key (shared by every service-account profile):
+#     GDRIVE_FSSPEC_CREDENTIALS_PATH=/path/to/sa.json   # path or JSON string
+#
+#   Per-profile shared-drive targets (name or ID):
+#     GDRIVE_FSSPEC_DRIVE_FULL_ACCESS=drive-full-access     # Manager role
+#     GDRIVE_FSSPEC_DRIVE_CONTENT_MANAGER=drive-test        # Content-manager role
+#     GDRIVE_FSSPEC_DRIVE_READONLY=drive-readonly           # Viewer role
+#
+#   sa_my_drive profile:  same key, no shared drive (the SA's own My Drive).
+#
+# The default ``fs``/``make_fs`` suite runs as the full-access service account
+# when GDRIVE_FSSPEC_CREDENTIALS_PATH is set. With it unset, the same suite runs
+# as a user via OAuth: a one-time browser login populates the cache and every
+# later filesystem reuses it. That OAuth path is skipped in CI (which always has
+# the service-account key). Shared-drive-only tests skip under OAuth (My Drive
+# has no shared drive).
 # ---------------------------------------------------------------------------
 
 from typing import cast
 
 import pytest
 from conftest import TESTDIR, FsFactory
+from googleapiclient.errors import HttpError
 
 from gdrive_fsspec.core import GoogleDriveFile, GoogleDriveFileSystem
 
@@ -156,37 +164,106 @@ def test_rm_missing_file_raises_file_not_found(
         fs.rm(_test_path("never_existed"))
 
 
+# ---------------------------------------------------------------------------
+# Content-manager profile (drive-test): may trash but not permanently delete.
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.integration
-def test_rm_insufficient_trash_permissions_raises_permission_error(
-    fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
-) -> None:
-    # A file created by the privileged identity but deleted through a read-only
-    # identity: visible in ls(), forbidden to trash. rm checks capabilities.canTrash
-    # up front and raises an actionable PermissionError instead of a masked 404.
-    filename = _test_path("forbidden_trash")
-    with fs.open(filename, "wb") as f:
+def test_content_manager_can_trash(content_manager_fs: GoogleDriveFileSystem) -> None:
+    # Content managers have write + trash rights, so a normal rm() succeeds.
+    filename = _test_path("cm_trash")
+    with content_manager_fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
-        f.write(b"cannot trash me")
+        f.write(b"trash me")
 
-    assert readonly_fs.exists(filename)
-    with pytest.raises(PermissionError, match="Trash"):
-        readonly_fs.rm(filename)
+    assert content_manager_fs.exists(filename)
+    content_manager_fs.rm(filename)
+    assert not content_manager_fs.exists(filename)
 
 
 @pytest.mark.integration
-def test_rm_permanent_insufficient_permissions_raises_permission_error(
-    fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
+def test_content_manager_permanent_delete_raises_permission_error(
+    content_manager_fs: GoogleDriveFileSystem,
 ) -> None:
     # permanent=True checks capabilities.canDelete and raises an actionable
-    # PermissionError (mentioning Manager access) instead of a masked 404.
-    filename = _test_path("forbidden_delete")
-    with fs.open(filename, "wb") as f:
+    # PermissionError (mentioning Manager access) instead of a masked 404, since
+    # a content manager lacks the Manager role required to hard-delete.
+    filename = _test_path("cm_forbidden_delete")
+    with content_manager_fs.open(filename, "wb") as f:
         # pyrefly: ignore [bad-argument-type]
         f.write(b"cannot delete me")
 
-    assert readonly_fs.exists(filename)
+    assert content_manager_fs.exists(filename)
     with pytest.raises(PermissionError, match="Manager"):
-        readonly_fs.rm(filename, permanent=True)
+        content_manager_fs.rm(filename, permanent=True)
+
+
+# ---------------------------------------------------------------------------
+# Read-only profile (drive-readonly): reads succeed, every mutation is denied.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_readonly_lists_root(readonly_fs: GoogleDriveFileSystem) -> None:
+    listing = readonly_fs.ls("", detail=True)
+    assert isinstance(listing, list)
+
+
+@pytest.mark.integration
+def test_readonly_write_is_denied(readonly_fs: GoogleDriveFileSystem) -> None:
+    # Uploads run the resumable-session initiation, which surfaces the 403 as an
+    # OSError (IOError) rather than a raw HttpError.
+    with pytest.raises(OSError):
+        with readonly_fs.open("gdrive_fsspec_readonly_probe", "wb") as f:
+            # pyrefly: ignore [bad-argument-type]
+            f.write(b"nope")
+
+
+@pytest.mark.integration
+def test_readonly_mkdir_is_denied(readonly_fs: GoogleDriveFileSystem) -> None:
+    # Folder creation goes through the discovery client, so the 403 arrives as
+    # an HttpError.
+    with pytest.raises(HttpError):
+        readonly_fs.mkdir("gdrive_fsspec_readonly_dir")
+
+
+@pytest.mark.integration
+def test_readonly_trash_is_denied_for_existing_file(
+    readonly_fs: GoogleDriveFileSystem,
+) -> None:
+    # A viewer can see files but not trash them. This needs a pre-seeded file in
+    # the read-only drive (the viewer cannot create one); skip when empty.
+    entries = readonly_fs.ls("", detail=True)
+    files = [e for e in entries if e["type"] == "file"]
+    if not files:
+        pytest.skip("drive-readonly has no seed file to attempt trashing")
+    target = files[0]["name"]
+    with pytest.raises(PermissionError, match="Trash"):
+        readonly_fs.rm(target)
+
+
+# ---------------------------------------------------------------------------
+# Service account without a shared drive: its own My Drive has no storage quota.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_sa_my_drive_lists_root(sa_my_drive_fs: GoogleDriveFileSystem) -> None:
+    listing = sa_my_drive_fs.ls("", detail=True)
+    assert isinstance(listing, list)
+
+
+@pytest.mark.integration
+def test_sa_my_drive_upload_exceeds_quota(
+    sa_my_drive_fs: GoogleDriveFileSystem,
+) -> None:
+    # Service accounts cannot own files in their own My Drive (no quota), so an
+    # upload must fail rather than silently succeed.
+    with pytest.raises(OSError):
+        with sa_my_drive_fs.open("gdrive_fsspec_sa_probe", "wb") as f:
+            # pyrefly: ignore [bad-argument-type]
+            f.write(b"no quota here")
 
 
 @pytest.mark.integration
