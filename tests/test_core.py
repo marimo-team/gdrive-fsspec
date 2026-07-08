@@ -5,8 +5,14 @@ from unittest import mock
 import pytest
 from conftest import MockedDriveFS
 from googleapiclient.errors import HttpError
+from googleapiclient.http import HttpRequest
 
-from gdrive_fsspec.core import DIR_MIME_TYPE, GoogleDriveFile, GoogleDriveFileSystem
+from gdrive_fsspec.core import (
+    _NUM_RETRIES,
+    DIR_MIME_TYPE,
+    GoogleDriveFile,
+    GoogleDriveFileSystem,
+)
 
 
 def test_create_anon(anon_fs: GoogleDriveFileSystem) -> None:
@@ -373,3 +379,119 @@ def test_service_account_empty_creds_raises(creds: str) -> None:
             creds=creds,
             skip_instance_cache=True,
         )
+
+
+def test_files_get_execute_passes_num_retries(mocked_fs: MockedDriveFS) -> None:
+    mocked_fs.files.get.return_value.execute.return_value = {
+        "id": "folder-id",
+        "trashed": False,
+        "mimeType": DIR_MIME_TYPE,
+    }
+
+    mocked_fs.fs._validate_root_file_id("folder-id")
+
+    mocked_fs.files.get.return_value.execute.assert_called_once_with(
+        num_retries=_NUM_RETRIES
+    )
+
+
+def test_about_get_execute_passes_num_retries(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    expected = {DIR_MIME_TYPE: ["text/plain"]}
+    mocked_fs.service.about().get().execute.return_value = {"exportFormats": expected}
+
+    assert fs.export_formats == expected
+
+    mocked_fs.service.about().get().execute.assert_called_once_with(
+        num_retries=_NUM_RETRIES
+    )
+
+
+def _drive_http_request(http: mock.Mock) -> HttpRequest:
+    return HttpRequest(
+        http,
+        postproc=lambda _resp, content: content,
+        uri="https://www.googleapis.com/drive/v3/files/test",
+        method="GET",
+    )
+
+
+def test_execute_retries_transient_503_then_succeeds() -> None:
+    http = mock.Mock()
+    error_resp = mock.Mock(status=503)
+    ok_resp = mock.Mock(status=200)
+    http.request.side_effect = [
+        (error_resp, b'{"error": {"message": "unavailable"}}'),
+        (error_resp, b'{"error": {"message": "unavailable"}}'),
+        (ok_resp, b'{"id": "ok"}'),
+    ]
+    request = _drive_http_request(http)
+
+    with (
+        mock.patch.object(request, "_sleep"),
+        mock.patch.object(request, "_rand", return_value=0),
+    ):
+        result = request.execute(num_retries=_NUM_RETRIES)
+
+    assert result == b'{"id": "ok"}'
+    assert http.request.call_count == 3
+
+
+def test_execute_retries_rate_limit_403() -> None:
+    http = mock.Mock()
+    rate_limit_body = json.dumps(
+        {
+            "error": {
+                "errors": [
+                    {
+                        "domain": "usageLimits",
+                        "reason": "userRateLimitExceeded",
+                        "message": "User Rate Limit Exceeded",
+                    }
+                ],
+                "code": 403,
+                "message": "User Rate Limit Exceeded",
+            }
+        }
+    ).encode()
+    http.request.side_effect = [
+        (mock.Mock(status=403), rate_limit_body),
+        (mock.Mock(status=200), b'{"id": "ok"}'),
+    ]
+    request = _drive_http_request(http)
+
+    with (
+        mock.patch.object(request, "_sleep"),
+        mock.patch.object(request, "_rand", return_value=0),
+    ):
+        result = request.execute(num_retries=_NUM_RETRIES)
+
+    assert result == b'{"id": "ok"}'
+    assert http.request.call_count == 2
+
+
+def test_execute_does_not_retry_permission_403() -> None:
+    http = mock.Mock()
+    permission_body = json.dumps(
+        {
+            "error": {
+                "errors": [
+                    {
+                        "domain": "global",
+                        "reason": "insufficientFilePermissions",
+                        "message": "Insufficient permissions",
+                    }
+                ],
+                "code": 403,
+                "message": "Insufficient permissions",
+            }
+        }
+    ).encode()
+    http.request.return_value = (mock.Mock(status=403), permission_body)
+    request = _drive_http_request(http)
+
+    with pytest.raises(HttpError) as exc_info:
+        request.execute(num_retries=_NUM_RETRIES)
+
+    assert exc_info.value.status_code == 403
+    http.request.assert_called_once()
