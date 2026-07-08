@@ -70,7 +70,7 @@ Integration tests use a real Google Drive account and a directory named `gdrive_
 uv run pytest -v -m integration
 ```
 
-By default, the tests trigger a browser login to authenticate. However, you can also use service-account credentials. 
+By default, the tests trigger a browser login to authenticate. However, you can also use service-account credentials.
 
 Hence, we dedicate a **profile** to each method of testing. Each profile targets a different drive and has different roles. Any profile whose variables are unset is skipped, so you can run a subset locally.
 
