@@ -619,7 +619,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         downloader = MediaIoBaseDownload(buffer, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)
         return buffer.getvalue()
 
     def _resolve_drive_id(self, drive: str) -> str:

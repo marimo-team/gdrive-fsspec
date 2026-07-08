@@ -749,7 +749,7 @@ def test_export_streams_via_export_media(mocked_fs: MockedDriveFS) -> None:
         # Two chunks, then done; second next_chunk reports completion.
         chunks = iter([b"expo", b"rted"])
 
-        def next_chunk() -> tuple[mock.Mock, bool]:
+        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
             buffer.write(next(chunks))
             done = buffer.getvalue() == b"exported"
             return mock.Mock(), done
