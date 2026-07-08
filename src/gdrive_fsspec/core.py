@@ -5,6 +5,9 @@ import json
 import logging
 import os
 import pathlib
+import random
+import ssl
+import time
 import warnings
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
@@ -75,6 +78,39 @@ _DELETE_PERMISSION_SHARED_DRIVE_MSG = (
 _DELETE_PERMISSION_MSG = "Insufficient permissions to permanently delete the file."
 
 _NUM_RETRIES = 5
+
+# Transport-level failures worth retrying on the hand-rolled resumable-upload path
+_RETRYABLE_TRANSPORT_ERRORS = (
+    ConnectionError,
+    TimeoutError,
+    ssl.SSLError,
+    httplib2.ServerNotFoundError,
+)
+
+# 403 ``reason``s that mean throttling rather than a real authorization failure
+# See https://developers.google.com/workspace/drive/api/guides/handle-errors#rate-limit
+_RETRYABLE_403_REASONS = frozenset({"userRateLimitExceeded", "rateLimitExceeded"})
+
+
+def _should_retry_status(status: int, content: bytes) -> bool:
+    """Return whether a raw response is a transient failure worth retrying.
+
+    Mirrors the Drive-aware policy the discovery client applies to ``.execute()``:
+    https://github.com/googleapis/google-api-python-client/blob/main/googleapiclient/http.py#L80
+
+    Also see https://developers.google.com/workspace/drive/api/guides/handle-errors
+    """
+    if status >= 500 or status == 429:
+        return True
+    if status != 403 or not content:
+        return False
+
+    try:
+        error = json.loads(content.decode("utf-8")).get("error", {})
+        reasons = {entry.get("reason") for entry in error.get("errors", [])}
+    except (UnicodeDecodeError, ValueError, AttributeError):
+        return False
+    return bool(reasons & _RETRYABLE_403_REASONS)
 
 
 def _normalize_path(prefix: str, name: str) -> str:
@@ -1066,13 +1102,42 @@ class GoogleDriveFile(AbstractBufferedFile):
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
     ) -> tuple[httplib2.Response, bytes]:
-        """
-        Make an authenticated raw request via the owned transport.
+        """Make an authenticated raw request via the owned transport,
         Wraps ``fs.authed_http.request`` to make it typed.
+
+        The resumable-upload endpoints are driven by hand, and as such we implement our own retry logic,
+        ensuring that calls are idempotent.
         """
-        response, content = self.fs.authed_http.request(
-            uri, method=method, body=body, headers=headers
-        )
+        response: httplib2.Response | None = None
+        content: bytes | None = None
+        for attempt in range(_NUM_RETRIES + 1):
+            if attempt > 0:
+                sleep_time = random.random() * 2**attempt
+                LOGGER.warning(
+                    "Retrying resumable upload %s %s (attempt %d/%d) after %.2fs",
+                    method,
+                    uri,
+                    attempt,
+                    _NUM_RETRIES,
+                    sleep_time,
+                )
+                time.sleep(sleep_time)
+            try:
+                response, content = self.fs.authed_http.request(
+                    uri, method=method, body=body, headers=headers
+                )
+            except _RETRYABLE_TRANSPORT_ERRORS:
+                if attempt == _NUM_RETRIES:
+                    raise
+                continue
+            # Stop once the status is terminal, or on the last attempt where a
+            # still-retryable status is the best (final) result the caller gets.
+            if attempt == _NUM_RETRIES or not _should_retry_status(
+                int(response["status"]), content
+            ):
+                break
+        if response is None or content is None:
+            raise RuntimeError("Resumable upload retry loop exited without a result")
         return response, content
 
     @override

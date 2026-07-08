@@ -18,6 +18,28 @@ from gdrive_fsspec.core import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fast_upload_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize the resumable-upload retry backoff so retry paths are instant.
+
+    ``_authed_request`` sleeps with exponential backoff between attempts; tests
+    that exercise retryable statuses would otherwise add real wall-clock delay.
+    """
+    monkeypatch.setattr("gdrive_fsspec.core.time.sleep", lambda *_a, **_k: None)
+
+
+def _rate_limit_403_body() -> bytes:
+    return json.dumps(
+        {"error": {"errors": [{"reason": "userRateLimitExceeded"}], "code": 403}}
+    ).encode()
+
+
+def _permission_403_body() -> bytes:
+    return json.dumps(
+        {"error": {"errors": [{"reason": "insufficientFilePermissions"}], "code": 403}}
+    ).encode()
+
+
 def _http_error(message: str) -> HttpError:
     response = mock.Mock(status=416, reason="Range Not Satisfiable")
     return HttpError(response, message.encode())
@@ -143,6 +165,48 @@ def test_initiate_upload_new_file(mocked_fs: MockedDriveFS) -> None:
         "name": "file.txt",
         "parents": ["parent-id"],
     }
+
+
+def test_initiate_upload_retries_transient_503(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    mocked_fs.files._http.request.side_effect = [
+        ({"status": "503"}, b"unavailable"),
+        (
+            {"status": "200", "location": "https://upload.example/resume?id=xyz"},
+            b"",
+        ),
+    ]
+
+    file = _write_file(fs)
+    try:
+        file._initiate_upload()
+    finally:
+        file.closed = True
+
+    assert file.location == "https://upload.example/resume?id=xyz"
+    assert mocked_fs.files._http.request.call_count == 2
+
+
+def test_initiate_upload_retries_dropped_connection(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # A dropped connection surfaces as an exception before any HTTP status; it
+    # must be retried like a transient status response.
+    mocked_fs.files._http.request.side_effect = [
+        ConnectionError("connection reset"),
+        (
+            {"status": "200", "location": "https://upload.example/resume?id=xyz"},
+            b"",
+        ),
+    ]
+
+    file = _write_file(fs)
+    try:
+        file._initiate_upload()
+    finally:
+        file.closed = True
+
+    assert file.location == "https://upload.example/resume?id=xyz"
+    assert mocked_fs.files._http.request.call_count == 2
 
 
 def test_initiate_upload_existing_file_patches(mocked_fs: MockedDriveFS) -> None:
@@ -499,6 +563,8 @@ def test_upload_chunk_error_non_utf8_body_raises_ioerror(
     mocked_fs: MockedDriveFS,
 ) -> None:
     fs = mocked_fs.fs
+    # A persistent 503 is retried, then surfaces as an IOError once the retries
+    # are exhausted. A non-UTF-8 body must still decode without blowing up.
     mocked_fs.files._http.request.return_value = ({"status": "503"}, b"\xff\xfe")
     file = _write_file(fs)
     file.write(b"data")
@@ -509,6 +575,120 @@ def test_upload_chunk_error_non_utf8_body_raises_ioerror(
             file._upload_chunk(final=False)
         finally:
             file.closed = True
+
+
+def test_upload_chunk_retries_transient_503_then_succeeds(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # First PUT fails transiently (503); the retry gets a normal 308 that the
+    # server fully accepts. The chunk method must see only the final response.
+    mocked_fs.files._http.request.side_effect = [
+        ({"status": "503"}, b"unavailable"),
+        ({"status": "308", "range": "0-999"}, b""),
+    ]
+    file = _write_file(fs)
+    file.write(b"x" * 1000)
+    file.offset = 0
+
+    try:
+        result = file._upload_chunk(final=False)
+    finally:
+        file.closed = True
+
+    assert result is True
+    assert mocked_fs.files._http.request.call_count == 2
+
+
+def test_upload_chunk_retries_rate_limit_403_then_succeeds(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    fs.dircache["parent"] = empty_listing()
+    # A rate-limit 403 is retried (unlike a permission 403); the retry commits.
+    mocked_fs.files._http.request.side_effect = [
+        ({"status": "403"}, _rate_limit_403_body()),
+        (
+            {"status": "200"},
+            json.dumps(
+                {"id": "file-id", "name": "file.txt", "mimeType": "text/plain"}
+            ).encode(),
+        ),
+    ]
+    file = _write_file(fs)
+    file.write(b"data")
+    file.offset = 0
+
+    try:
+        file._upload_chunk(final=True)
+    finally:
+        file.closed = True
+
+    assert file.file_id == "file-id"
+    assert mocked_fs.files._http.request.call_count == 2
+
+
+def test_upload_chunk_permission_403_not_retried(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # A non-rate-limit 403 is a real authorization failure: raise immediately.
+    mocked_fs.files._http.request.return_value = (
+        {"status": "403"},
+        _permission_403_body(),
+    )
+    file = _write_file(fs)
+    file.write(b"data")
+    file.offset = 0
+
+    with pytest.raises(IOError, match=r"Chunk upload failed \(HTTP 403\)"):
+        try:
+            file._upload_chunk(final=False)
+        finally:
+            file.closed = True
+
+    mocked_fs.files._http.request.assert_called_once()
+
+
+def test_upload_chunk_final_retry_after_503_does_not_double_update_dircache(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    """A retried final chunk must apply its committed metadata exactly once.
+
+    Retries happen inside ``_authed_request``, below ``_upload_chunk``, so the
+    chunk method only ever observes the final (successful) response. This guards
+    that contract: the parent listing gets a single entry and ``file_id`` is set
+    once, even though the transport was invoked twice.
+    """
+    fs = mocked_fs.fs
+    fs.dircache["parent"] = empty_listing()
+    mocked_fs.files._http.request.side_effect = [
+        ({"status": "503"}, b"unavailable"),
+        (
+            {"status": "200"},
+            json.dumps(
+                {"id": "file-id", "name": "file.txt", "mimeType": "text/plain"}
+            ).encode(),
+        ),
+    ]
+    file = _write_file(fs)
+    file.write(b"data")
+    file.offset = 0
+
+    try:
+        file._upload_chunk(final=True)
+    finally:
+        file.closed = True
+
+    assert file.file_id == "file-id"
+    assert mocked_fs.files._http.request.call_count == 2
+    assert fs.dircache["parent"] == [
+        {
+            "id": "file-id",
+            "name": "parent/file.txt",
+            "mimeType": "text/plain",
+            "size": 4,
+            "type": "file",
+        }
+    ]
 
 
 def test_upload_chunk_unexpected_response_raises_ioerror(
