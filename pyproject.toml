@@ -42,8 +42,8 @@ dev = [
 ]
 
 [project.urls]
-Source = "http://github.com/fsspec/gdrive-fsspec"
-Contributing = "https://github.com/fsspec/gdrive-fsspec/blob/master/CONTRIBUTING.md"
+Source = "http://github.com/marimo-team/gdrive-fsspec"
+Contributing = "https://github.com/marimo-team/gdrive-fsspec/blob/main/CONTRIBUTING.md"
 
 [tool.setuptools_scm]
 version_file = "src/gdrive_fsspec/_version.py"
