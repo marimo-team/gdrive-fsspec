@@ -74,7 +74,7 @@ _DELETE_PERMISSION_SHARED_DRIVE_MSG = (
 )
 _DELETE_PERMISSION_MSG = "Insufficient permissions to permanently delete the file."
 
-_NUM_RETRIES = 2
+_NUM_RETRIES = 5
 
 
 def _normalize_path(prefix: str, name: str) -> str:
@@ -245,7 +245,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 fileId=root_file_id,
                 fields="id,trashed,mimeType,driveId",
                 supportsAllDrives=True,
-            ).execute()
+            ).execute(num_retries=_NUM_RETRIES)
         except HttpError as err:
             if err.status_code != 404:
                 raise
@@ -277,7 +277,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             Prefer passing ``drive`` instead of using this legacy path.
         """
         try:
-            self.service.drives().get(driveId=drive_id).execute()
+            self.service.drives().get(driveId=drive_id).execute(
+                num_retries=_NUM_RETRIES
+            )
         except HttpError as err:
             if err.status_code == 404:
                 raise FileNotFoundError(f"root_file_id {drive_id!r} not found") from err
@@ -370,9 +372,15 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         page_token: str | None = None
         while True:
             if page_token is None:
-                response = self.service.drives().list().execute()
+                response = (
+                    self.service.drives().list().execute(num_retries=_NUM_RETRIES)
+                )
             else:
-                response = self.service.drives().list(pageToken=page_token).execute()
+                response = (
+                    self.service.drives()
+                    .list(pageToken=page_token)
+                    .execute(num_retries=_NUM_RETRIES)
+                )
             drives.extend(response["drives"])
             page_token = response.get("nextPageToken")
             if page_token is None:
@@ -391,7 +399,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Returns:
             Mapping of source MIME type to its list of valid export targets.
         """
-        about = self.service.about().get(fields="exportFormats").execute()
+        about = (
+            self.service.about()
+            .get(fields="exportFormats")
+            .execute(num_retries=_NUM_RETRIES)
+        )
         return about.get("exportFormats", {})
 
     def _path_str(self, path: PathLike) -> str:
@@ -443,7 +455,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             "parents": [parent_id],
         }
         LOGGER.debug(f"Creating {stripped_path}, child of {parent_id}")
-        out: File = self.files.create(body=meta, supportsAllDrives=True).execute()
+        out: File = self.files.create(body=meta, supportsAllDrives=True).execute(
+            num_retries=_NUM_RETRIES
+        )
         if parent in self.dircache:
             self.dircache[parent].append(_finfo_from_response(out, path_prefix=parent))
         self.dircache[stripped_path] = []
@@ -813,7 +827,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             fields=merge_fields(INFO_FIELDS, fields),
             supportsAllDrives=True,
             **kwargs,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         parent = self._parent(stripped_path)
         return _finfo_from_response(meta, path_prefix=parent)
 
@@ -895,7 +909,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                     orderBy="name",
                     pageSize=1000,
                     **kwargs,
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
             else:
                 response = self.files.list(
                     q=query,
@@ -905,7 +919,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                     orderBy="name",
                     pageSize=1000,
                     **kwargs,
-                ).execute()
+                ).execute(num_retries=_NUM_RETRIES)
             for file in response.get("files", []):
                 all_files.append(_finfo_from_response(file, path_prefix))
             page_token = response.get("nextPageToken", None)
@@ -1036,7 +1050,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         else:
             self._media_object.headers.pop("Range", None)
         try:
-            data = self._media_object.execute()
+            data = self._media_object.execute(num_retries=_NUM_RETRIES)
             return data
         except HttpError as e:
             # TODO : doc says server might send everything if range is outside
