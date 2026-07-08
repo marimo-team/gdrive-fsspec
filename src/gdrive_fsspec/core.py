@@ -1102,11 +1102,13 @@ class GoogleDriveFile(AbstractBufferedFile):
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
     ) -> tuple[httplib2.Response, bytes]:
-        """Make an authenticated raw request via the owned transport,
-        Wraps ``fs.authed_http.request`` to make it typed.
+        """Make an authenticated raw request via the owned transport.
 
-        The resumable-upload endpoints are driven by hand, and as such we implement our own retry logic,
-        ensuring that calls are idempotent.
+        Wraps ``fs.authed_http.request`` with typed return values and retries
+        transient failures with exponential backoff. Resumable-upload endpoints
+        are driven by hand (they bypass the discovery client's ``num_retries``),
+        so this mirrors ``googleapiclient.http._should_retry_response``: retry
+        ``5xx``, ``429``, rate-limit ``403``s, and transport errors.
         """
         response: httplib2.Response | None = None
         content: bytes | None = None
