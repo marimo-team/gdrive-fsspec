@@ -99,6 +99,8 @@ To run tests with browser authentication, run `GDRIVE_FSSPEC_FORCE_BROWSER=1 uv 
 
 Service accounts cannot own files in Google Drive and have no storage quota. Uploads must target a [Shared Drive](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) where the service account is a member with at least **Contributor** access. See [Google's storage-limit errors](https://developers.google.com/workspace/drive/api/guides/handle-errors#storage-limit).
 
+> **Note:** Integration tests do not run on PRs from forks, because those workflows cannot use repository secrets. They run on pushes to `main` and same-repo PRs. Google Drive has no good emulator; see [this discussion](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
+
 ### Creating a service account
 
 1. Enable Google Drive API for the project in the Google Cloud Console.
