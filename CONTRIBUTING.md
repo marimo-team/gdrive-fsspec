@@ -87,7 +87,7 @@ To run **all** tests (unit + integration), override the default marker filter:
 uv run pytest -v -m ""
 ```
 
-> **Note:** Integration tests do not run on PRs from forks, because those workflows cannot use repository secrets. They run on pushes to `master` and same-repo PRs. Google Drive has no good emulator; see [this discussion](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
+> **Note:** Integration tests do not run on PRs from forks, because those workflows cannot use repository secrets. They run on pushes to `main` and same-repo PRs. Google Drive has no good emulator; see [this discussion](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
 
 
 ### Creating a service account
