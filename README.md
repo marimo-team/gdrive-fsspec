@@ -42,6 +42,8 @@ with fs.open("my-folder/data.csv", "rb") as f:
 
 Most filesystem operations follow the [fsspec usage guide](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
 
+[![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/notebooks/nb_ALKUExChiFKFMrGvHkXMq1)
+
 ## Why use gdrive-fsspec
 
 1. **fsspec-native** — same API as S3, GCS, and local filesystems; works with ecosystem tools that accept an `AbstractFileSystem`.
