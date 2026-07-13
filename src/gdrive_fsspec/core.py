@@ -214,6 +214,8 @@ PathLike: TypeAlias = str | os.PathLike[str] | pathlib.Path
 
 
 class _PageListKwargs(TypedDict, total=False):
+    """The ``list`` method doesn't enforce good type params, so we use a TypedDict to help."""
+
     pageToken: str
 
 
