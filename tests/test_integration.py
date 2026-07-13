@@ -299,12 +299,17 @@ _SYNC_RETRIES = 12
 
 
 def _until(predicate: Callable[[], bool]) -> bool:
-    """Poll ``predicate`` up to ``_SYNC_RETRIES`` times, ~1s apart."""
-    for _ in range(_SYNC_RETRIES):
+    """Poll ``predicate`` up to ``_SYNC_RETRIES`` times, ~1s apart.
+
+    Checks at the start of each attempt and sleeps only *between* attempts, so
+    there are exactly ``_SYNC_RETRIES`` calls and no wasted trailing sleep.
+    """
+    for attempt in range(_SYNC_RETRIES):
+        if attempt:
+            time.sleep(1)
         if predicate():
             return True
-        time.sleep(1)
-    return predicate()
+    return False
 
 
 def _await_change_for(
