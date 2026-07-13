@@ -1,11 +1,3 @@
-"""Shared constants, aliases, and pure helpers for :mod:`gdrive_fsspec`.
-
-This module is the foundation both :mod:`gdrive_fsspec.core` (the filesystem)
-and :mod:`gdrive_fsspec._file` (the buffered file) build on. It imports nothing
-from the rest of the package except :mod:`.types`, so it never participates in
-an import cycle.
-"""
-
 from __future__ import annotations
 
 import logging
