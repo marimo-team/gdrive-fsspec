@@ -30,6 +30,7 @@ from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, build_http
+from typing_extensions import TypedDict
 
 from .types import FileInfo
 from .typing_utils import override
@@ -210,6 +211,11 @@ ROOT_DIR = ""
 
 # One path element — matches fsspec.stringify_path
 PathLike: TypeAlias = str | os.PathLike[str] | pathlib.Path
+
+
+class _PageTokenKwargs(TypedDict, total=False):
+    # Empty on the first page, ``pageToken`` on later ones.
+    pageToken: str
 
 
 class GoogleDriveFileSystem(AbstractFileSystem):
@@ -406,8 +412,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             raise ValueError(f"Invalid connection method `{method}`.")
 
-        # Record the auth method so features that require real credentials (the
-        # Changes API) can stay dormant under anonymous access.
         self._auth_method = method
         self._is_anonymous = method == "anon"
 
@@ -479,7 +483,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         drives: list[Drive] = []
         page_token: str | None = None
         while True:
-            page_kwargs: dict[str, Any] = (
+            page_kwargs: _PageTokenKwargs = (
                 {"pageToken": page_token} if page_token else {}
             )
             response = (
@@ -1281,7 +1285,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         kwargs = self._drive_kw()
         while True:
             LOGGER.debug("%s ; prefix %s", query, path_prefix)
-            page_kwargs: dict[str, Any] = (
+            page_kwargs: _PageTokenKwargs = (
                 {"pageToken": page_token} if page_token else {}
             )
             response = self.files.list(
@@ -1335,9 +1339,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         matches: list[File] = []
         page_token: str | None = None
         while True:
-            page_kwargs: dict[str, Any] = {}
-            if page_token is not None:
-                page_kwargs["pageToken"] = page_token
+            page_kwargs: _PageTokenKwargs = (
+                {"pageToken": page_token} if page_token else {}
+            )
             response = self.files.list(
                 q=query,
                 spaces=self.spaces,
