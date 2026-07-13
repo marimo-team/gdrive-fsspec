@@ -703,7 +703,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         logged and swallowed, leaving the (possibly stale) cache in place; the
         TTL was already stamped, so this does not hot-loop on repeated reads.
         """
-        if self._changes_sync_interval is None:
+        if self._changes_sync_interval is None or self._is_anonymous:
+            # Disabled, or reconnected to anonymous credentials after enabling
+            # sync (the Changes API requires authentication).
             return
         now = time.monotonic()
         if (
@@ -724,13 +726,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         whole cache when a change cannot be mapped or the page token expired.
         The very first call only baselines the token.
         """
-        # Stamp first so a mid-flight failure still honors the TTL
-        self._last_sync_monotonic = time.monotonic()
-
         if self._changes_page_token is None:
-            # Lazy baseline: there is nothing to reconcile before the first token.
+            # Lazy baseline: there is nothing to reconcile before the first token,
+            # so do NOT stamp the TTL clock — the next read should perform the
+            # first real reconciliation immediately.
             self._changes_page_token = self._get_start_page_token()
             return
+
+        # Stamp before reconciling so a mid-flight failure still honors the TTL
+        # and repeated reads do not hammer the API.
+        self._last_sync_monotonic = time.monotonic()
 
         try:
             changes, new_token = self._iter_changes(self._changes_page_token)

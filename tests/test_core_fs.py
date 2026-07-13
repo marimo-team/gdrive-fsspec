@@ -364,6 +364,7 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
             "name": "parent",
             "id": "parent-id",
             "type": "directory",
+            "size": 0,
             "mimeType": DIR_MIME_TYPE,
         }
     )
@@ -373,6 +374,7 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
                 "name": "parent/child.txt",
                 "id": "child-id",
                 "type": "file",
+                "size": 0,
                 "mimeType": "text/plain",
             }
         ]
@@ -391,6 +393,7 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
                 "name": "parent/child.txt",
                 "id": "child-id",
                 "type": "file",
+                "size": 0,
                 "mimeType": "text/plain",
             }
         ]
@@ -1178,6 +1181,9 @@ def _enable_sync(fs: GoogleDriveFileSystem, interval: float = 60) -> None:
     fs._changes_sync_interval = interval
     fs._changes_page_token = "T"
     fs._last_sync_monotonic = None
+    # These tests simulate an authenticated sync-enabled instance; the anon_fs
+    # fixture is anonymous, which the read hook (correctly) treats as dormant.
+    fs._is_anonymous = False
     # Seed the cached real root id so _build_dir_id_to_path does not issue a
     # files.get during sync. Tests that exercise root-level changes override it.
     fs.__dict__.setdefault("_resolved_root_id", fs.root_file_id)
@@ -1195,6 +1201,9 @@ def test_first_sync_baselines_only(mocked_fs: MockedDriveFS) -> None:
     assert fs._changes_page_token == "TOK0"
     list_request.execute.assert_not_called()
     assert fs.dircache["d"] == [_file("d/x", "x-id")]
+    # A baseline-only call must NOT consume the TTL window: the next read has to
+    # perform the first real reconciliation immediately.
+    assert fs._last_sync_monotonic is None
 
 
 def test_resolved_root_id_resolves_alias(mocked_fs: MockedDriveFS) -> None:
@@ -1684,6 +1693,20 @@ def test_sync_my_drive_scope_omits_drive_id(mocked_fs: MockedDriveFS) -> None:
 def test_maybe_sync_dormant_when_interval_none(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs._changes_sync_interval = None
+    fs.dircache["d"] = [_file("d/x", "x-id")]
+
+    fs.ls("d")
+    fs.info("d/x")
+
+    mocked_fs.service.changes.assert_not_called()
+
+
+def test_maybe_sync_dormant_when_anonymous(mocked_fs: MockedDriveFS) -> None:
+    # If an instance is reconnected to anonymous credentials after sync was
+    # enabled, the read hook must stay dormant (the Changes API needs auth).
+    fs = mocked_fs.fs
+    _enable_sync(fs)
+    fs._is_anonymous = True
     fs.dircache["d"] = [_file("d/x", "x-id")]
 
     fs.ls("d")
