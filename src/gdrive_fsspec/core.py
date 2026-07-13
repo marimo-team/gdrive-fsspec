@@ -10,8 +10,8 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Mapping,
     MutableMapping,
-    cast,
     overload,
 )
 
@@ -877,14 +877,28 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             return sorted([file["name"] for file in files])
 
+    if TYPE_CHECKING:
+        # The info() override below narrows the return to FileInfo, which needs the
+        # [bad-override] ignore because fsspec's base info() returns dict[str, Any].
+        # That ignore is scoped to the error *code*, so on its own it would also
+        # mask a *different* future incompatibility carrying the same code — e.g.
+        # fsspec changing info()'s return type out from under us. Pin the base
+        # contract here: if fsspec's info() stops returning a Mapping[str, Any],
+        # this assignment fails as a [bad-assignment] on its own line, independent
+        # of the ignore below, so the drift can't slip past silently.
+        def _assert_base_info_return(self) -> None:
+            _base_return: Mapping[str, Any] = AbstractFileSystem.info(self, "")
+            del _base_return
+
     @override
+    # pyrefly: ignore [bad-override]  # narrower FileInfo return; fsspec base is dict[str, Any]
     def info(
         self,
         path: PathLike,
         trashed: bool = False,
         fields: str | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> FileInfo:
         """Return metadata for a file or directory.
 
         Args:
@@ -907,7 +921,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 "size": 0,
                 "id": self.root_file_id,
             }
-            return cast(dict[str, Any], info)
+            return info
 
         # A blank mask means "no extra fields".
         fields = (fields or "").strip() or None
@@ -925,7 +939,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             file_info = _finfo_from_response(
                 meta, path_prefix=self._parent(stripped_path)
             )
-        return cast(dict[str, Any], file_info)
+        return file_info
 
     def export(self, path: PathLike, mime_type: str) -> bytes:
         """Export a Google-native file to another format and download it.

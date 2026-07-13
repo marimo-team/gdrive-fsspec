@@ -6,7 +6,7 @@ import io
 import json
 import random
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httplib2
@@ -119,7 +119,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             # the existing file instead of creating an identically-named
             # duplicate.
             try:
-                existing: FileInfo = cast(FileInfo, fs.info(path))
+                existing: FileInfo = fs.info(path)
             except MultipleFilesError:
                 raise
             except FileNotFoundError:

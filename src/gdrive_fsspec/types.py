@@ -21,6 +21,13 @@ class _FsspecRequired(TypedDict):
     type: Literal["file", "directory"]
 
 
+class _Capabilities(TypedDict, total=False):
+    """Subset of Drive v3 ``File.capabilities`` requested for permission checks."""
+
+    canDelete: bool
+    canTrash: bool
+
+
 class _DrivePartialFields(TypedDict, total=False):
     """Subset of Drive v3 ``File`` fields requested via ``FIELDS``."""
 
@@ -30,6 +37,8 @@ class _DrivePartialFields(TypedDict, total=False):
     version: str
     createdTime: str
     modifiedTime: str
+    driveId: str
+    capabilities: _Capabilities
 
 
 class FileInfo(_FsspecRequired, _DrivePartialFields, extra_items=Any):
