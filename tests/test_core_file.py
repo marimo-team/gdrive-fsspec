@@ -112,6 +112,21 @@ def test_fetch_range_with_byte_range(mocked_fs: MockedDriveFS) -> None:
     assert media.headers["Range"] == "bytes=0-2"
 
 
+def test_fetch_range_open_ended_reads_through_eof(mocked_fs: MockedDriveFS) -> None:
+    # start set, end=None means "from offset through EOF": an open-ended HTTP
+    # range (bytes=<start>-), not a malformed bytes=<start>--1.
+    fs = mocked_fs.fs
+    media = mock.Mock()
+    media.headers = empty_headers()
+    media.execute.return_value = b"lo"
+    mocked_fs.files.get_media.return_value = media
+
+    file = _read_file(fs)
+    file._fetch_range(3, None)
+
+    assert media.headers["Range"] == "bytes=3-"
+
+
 def test_fetch_range_not_satisfiable_returns_empty(
     mocked_fs: MockedDriveFS,
 ) -> None:

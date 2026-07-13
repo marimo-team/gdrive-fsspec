@@ -159,9 +159,16 @@ class GoogleDriveFile(AbstractBufferedFile):
                 fileId=self.file_id, supportsAllDrives=True
             )
         if start is not None or end is not None:
-            start = start or 0
-            end = end or 0
-            self._media_object.headers["Range"] = "bytes=%i-%i" % (start, end - 1)
+            # HTTP byte ranges are inclusive; ``end`` here is exclusive. An open
+            # end (``None``) means "through EOF", expressed as ``bytes=<start>-``.
+            range_start = start or 0
+            if end is not None:
+                self._media_object.headers["Range"] = "bytes=%i-%i" % (
+                    range_start,
+                    end - 1,
+                )
+            else:
+                self._media_object.headers["Range"] = "bytes=%i-" % range_start
         else:
             self._media_object.headers.pop("Range", None)
         try:
