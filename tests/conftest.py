@@ -4,9 +4,11 @@ from typing import Any, Callable, Generator, NamedTuple
 from unittest import mock
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from gdrive_fsspec import GoogleDriveFileSystem
 from gdrive_fsspec.core import AuthMethod
+from gdrive_fsspec.types import FileInfo
 
 TESTDIR = "gdrive_fsspec_testdir"
 
@@ -17,7 +19,7 @@ def empty_headers() -> dict[str, str]:
     return {}
 
 
-def empty_listing() -> list[dict[str, Any]]:
+def empty_listing() -> list[FileInfo]:
     return []
 
 
@@ -261,16 +263,18 @@ def _remove_testdir(instance: GoogleDriveFileSystem) -> None:
     Managers can permanently delete; content managers can only trash. Try the
     stronger operation first and fall back so cleanup works for either role.
     """
+    # Drop any cached listings first so cleanup resolves against live metadata
+    instance.invalidate_cache()
     try:
         if not instance.exists(TESTDIR):
             return
-    except (OSError, PermissionError):
+    except (OSError, PermissionError, HttpError):
         return
     for permanent in (True, False):
         try:
             instance.rm(TESTDIR, recursive=True, permanent=permanent)
             return
-        except (OSError, PermissionError):
+        except (OSError, PermissionError, HttpError):
             continue
 
 

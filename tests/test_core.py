@@ -278,52 +278,56 @@ def test_validate_root_file_id_propagates_non_404_from_files_get(
 
 
 def test_ls_empty_root_returns_empty(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs._list_directory_by_id = mock.Mock(return_value=[])
+    anon_fs._list_children = mock.Mock(return_value=[])
 
     assert anon_fs.ls("") == []
     assert anon_fs.dircache[""] == []
 
 
-def test_ls_missing_child_in_populated_parent_raises(
-    anon_fs: GoogleDriveFileSystem,
-) -> None:
-    anon_fs._list_directory_by_id = mock.Mock(
-        return_value=[
-            {
-                "name": "other",
-                "id": "other-id",
-                "type": "file",
-                "mimeType": "text/plain",
-            }
-        ]
-    )
+def test_ls_missing_path_raises(anon_fs: GoogleDriveFileSystem) -> None:
+    anon_fs._find_child_by_name = mock.Mock(return_value=None)
 
     with pytest.raises(FileNotFoundError):
         anon_fs.ls("missing")
 
 
-def test_ls_missing_path_on_empty_root_raises(
+def test_ls_missing_child_in_cached_parent_raises(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs._list_directory_by_id = mock.Mock(return_value=[])
+    # A cached parent listing is authoritative: a name missing from it raises
+    # without any API call.
+    anon_fs.dircache[""] = [
+        {
+            "name": "other",
+            "id": "other-id",
+            "size": 0,
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
+    anon_fs._find_child_by_name = mock.Mock()
 
     with pytest.raises(FileNotFoundError):
         anon_fs.ls("missing")
+
+    anon_fs._find_child_by_name.assert_not_called()
 
 
 def test_invalidate_cache_path(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [{"name": "parent/file"}]
-    anon_fs.dircache["other"] = [{"name": "other/file"}]
+    anon_fs.dircache["parent"] = [{"name": "parent/file", "size": 0, "type": "file"}]
+    anon_fs.dircache["other"] = [{"name": "other/file", "size": 0, "type": "file"}]
 
     anon_fs.invalidate_cache("parent")
 
     assert "parent" not in anon_fs.dircache
-    assert anon_fs.dircache["other"] == [{"name": "other/file"}]
+    assert anon_fs.dircache["other"] == [
+        {"name": "other/file", "size": 0, "type": "file"}
+    ]
 
 
 def test_invalidate_cache_all(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [{"name": "parent/file"}]
-    anon_fs.dircache["other"] = [{"name": "other/file"}]
+    anon_fs.dircache["parent"] = [{"name": "parent/file", "size": 0, "type": "file"}]
+    anon_fs.dircache["other"] = [{"name": "other/file", "size": 0, "type": "file"}]
 
     anon_fs.invalidate_cache()
 

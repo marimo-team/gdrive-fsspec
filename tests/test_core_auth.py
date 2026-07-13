@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from googleapiclient.errors import HttpError
+
 from gdrive_fsspec.core import ROOT_ID, GoogleDriveFileSystem
 
 
@@ -15,6 +17,71 @@ def test_anon_clears_drive() -> None:
     )
 
     assert fs.drive is None
+
+
+def test_changes_sync_baselines_token_at_construction() -> None:
+    # With sync enabled, the token is baselined eagerly so the first cached read
+    # reconciles immediately, rather than the baseline consuming the first TTL
+    # window.
+    target = "gdrive_fsspec.core.service_account.Credentials.from_service_account_info"
+    with mock.patch(target, return_value=mock.Mock()):
+        with mock.patch("gdrive_fsspec.core.build"):
+            with mock.patch.object(
+                GoogleDriveFileSystem,
+                "_get_start_page_token",
+                return_value="BASELINE",
+            ) as baseline:
+                fs = GoogleDriveFileSystem(
+                    token="service_account",
+                    creds={"type": "service_account"},
+                    changes_sync_interval=60,
+                    skip_instance_cache=True,
+                )
+
+    baseline.assert_called_once_with()
+    assert fs._changes_page_token == "BASELINE"
+    # The baseline must NOT stamp the sync clock, or the first read would be
+    # gated out of a real reconciliation.
+    assert fs._last_sync_monotonic is None
+
+
+def test_changes_sync_baseline_failure_does_not_abort_construction() -> None:
+    # A baseline failure at construction must degrade to a lazy baseline on the
+    # first sync, not crash the constructor.
+    target = "gdrive_fsspec.core.service_account.Credentials.from_service_account_info"
+    err = HttpError(mock.Mock(status=403, reason="Forbidden"), b'{"error": {}}')
+    with mock.patch(target, return_value=mock.Mock()):
+        with mock.patch("gdrive_fsspec.core.build"):
+            with mock.patch.object(
+                GoogleDriveFileSystem, "_get_start_page_token", side_effect=err
+            ):
+                fs = GoogleDriveFileSystem(
+                    token="service_account",
+                    creds={"type": "service_account"},
+                    changes_sync_interval=60,
+                    skip_instance_cache=True,
+                )
+
+    # Construction succeeded; the token is unset so the first sync re-baselines.
+    assert fs._changes_sync_interval == 60
+    assert fs._changes_page_token is None
+
+
+def test_changes_sync_disabled_makes_no_baseline_call() -> None:
+    target = "gdrive_fsspec.core.service_account.Credentials.from_service_account_info"
+    with mock.patch(target, return_value=mock.Mock()):
+        with mock.patch("gdrive_fsspec.core.build"):
+            with mock.patch.object(
+                GoogleDriveFileSystem, "_get_start_page_token"
+            ) as baseline:
+                fs = GoogleDriveFileSystem(
+                    token="service_account",
+                    creds={"type": "service_account"},
+                    skip_instance_cache=True,
+                )
+
+    baseline.assert_not_called()
+    assert fs._changes_page_token is None
 
 
 def test_init_resolves_drive_for_non_anon() -> None:
