@@ -8,17 +8,17 @@ import pytest
 from conftest import MockedDriveFS, empty_files_list_response, empty_listing
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import (
+from gdrive_fsspec._constants import (
     _CHANGES_FIELDS,
     _CHANGES_PAGE_SIZE,
     _NUM_RETRIES,
     DIR_MIME_TYPE,
     INFO_FIELDS,
     ROOT_ID,
-    GoogleDriveFile,
-    GoogleDriveFileSystem,
     MultipleFilesError,
 )
+from gdrive_fsspec._file import GoogleDriveFile
+from gdrive_fsspec.core import GoogleDriveFileSystem
 from gdrive_fsspec.types import FileInfo
 from gdrive_fsspec.utils import merge_fields
 

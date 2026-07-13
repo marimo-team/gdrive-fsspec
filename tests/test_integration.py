@@ -31,11 +31,9 @@ import pytest
 from conftest import TESTDIR, FsFactory
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import (
-    GoogleDriveFile,
-    GoogleDriveFileSystem,
-    MultipleFilesError,
-)
+from gdrive_fsspec._constants import MultipleFilesError
+from gdrive_fsspec._file import GoogleDriveFile
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 def _test_path(name: str) -> str:
@@ -48,7 +46,6 @@ def test_simple(fs: GoogleDriveFileSystem) -> None:
     data = b"hello"
     filename = _test_path("testfile")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(data)
     assert fs.cat(filename) == data
 
@@ -58,10 +55,8 @@ def test_overwrite_updates_in_place(fs: GoogleDriveFileSystem) -> None:
     """Writing to an existing path updates it instead of creating a duplicate."""
     filename = _test_path("overwrite")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"first")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"second longer content")
 
     entries = fs.ls(TESTDIR, detail=True)
@@ -75,12 +70,10 @@ def test_overwrite_preserves_file_id(fs: GoogleDriveFileSystem) -> None:
     """Overwrite PATCHes the existing file rather than delete-and-recreate."""
     filename = _test_path("overwrite_id")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"v1")
     original_id = fs.info(filename)["id"]
 
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"v2")
 
     assert fs.info(filename)["id"] == original_id
@@ -96,13 +89,11 @@ def test_overwrite_updates_live_dircache(fs: GoogleDriveFileSystem) -> None:
     """
     filename = _test_path("overwrite_cache")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"one")
     # Populate the dircache for the parent.
     fs.ls(TESTDIR, detail=True)
 
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"two!")
 
     entries = fs.ls(TESTDIR, detail=True)  # served from cache
@@ -122,7 +113,6 @@ def test_create_directory(fs: GoogleDriveFileSystem) -> None:
 
     data = b"intermediate path"
     with fs.open(_test_path("data/bar/test"), "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(data)
     assert fs.cat(_test_path("data/bar/test")) == data
 
@@ -133,7 +123,6 @@ def test_rm_file_trashes_by_default(fs: GoogleDriveFileSystem) -> None:
     # recoverable and still resolvable with trashed=True.
     filename = _test_path("to_delete")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"gone soon")
 
     assert fs.exists(filename)
@@ -148,7 +137,6 @@ def test_rm_permanent_removes_file(fs: GoogleDriveFileSystem) -> None:
     # permanent=True hard-deletes: the file is gone even from trashed listings.
     filename = _test_path("to_purge")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"gone for good")
 
     assert fs.exists(filename)
@@ -179,7 +167,6 @@ def test_content_manager_can_trash(content_manager_fs: GoogleDriveFileSystem) ->
     # Content managers have write + trash rights, so a normal rm() succeeds.
     filename = _test_path("cm_trash")
     with content_manager_fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"trash me")
 
     assert content_manager_fs.exists(filename)
@@ -196,7 +183,6 @@ def test_content_manager_permanent_delete_raises_permission_error(
     # a content manager lacks the Manager role required to hard-delete.
     filename = _test_path("cm_forbidden_delete")
     with content_manager_fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"cannot delete me")
 
     assert content_manager_fs.exists(filename)
@@ -221,7 +207,6 @@ def test_readonly_write_is_denied(readonly_fs: GoogleDriveFileSystem) -> None:
     # OSError (IOError) rather than a raw HttpError.
     with pytest.raises(OSError):
         with readonly_fs.open("gdrive_fsspec_readonly_probe", "wb") as f:
-            # pyrefly: ignore [bad-argument-type]
             f.write(b"nope")
 
 
@@ -267,7 +252,6 @@ def test_sa_my_drive_upload_exceeds_quota(
     # upload must fail rather than silently succeed.
     with pytest.raises(OSError):
         with sa_my_drive_fs.open("gdrive_fsspec_sa_probe", "wb") as f:
-            # pyrefly: ignore [bad-argument-type]
             f.write(b"no quota here")
 
 
@@ -359,7 +343,6 @@ def test_changes_sync_reconciles_out_of_band_create(
     # External create via a separate instance; invisible to the cached listing.
     new_file = f"{subdir}/external.txt"
     with other.open(new_file, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"from another process")
 
     # Each ls triggers a sync (interval=0) that drops the stale listing and
@@ -401,7 +384,6 @@ def test_changes_sync_surgical_invalidation_keeps_siblings(
 
     new_file = f"{target}/only_here.txt"
     with other.open(new_file, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"surgical")
     file_id = other._path_to_id(new_file)
 
@@ -439,7 +421,6 @@ def test_changes_sync_reconciles_out_of_band_trash(
     doomed = f"{subdir}/doomed.txt"
     watcher.mkdir(subdir)
     with watcher.open(doomed, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"bye")
 
     watcher._sync_cache()  # baseline
@@ -467,7 +448,6 @@ def test_changes_sync_reconciles_out_of_band_hard_delete(
     doomed = f"{subdir}/gone.txt"
     watcher.mkdir(subdir)
     with watcher.open(doomed, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"poof")
 
     watcher._sync_cache()  # baseline
@@ -499,7 +479,6 @@ def test_changes_sync_reconciles_out_of_band_move(
     watcher.makedirs(dst)
     mover = f"{src}/mover.txt"
     with watcher.open(mover, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"move me")
 
     # Warm from the root down so src/dst ids are derivable (fully mapped).
@@ -564,7 +543,6 @@ def test_changes_sync_moved_cached_directory_drops_subtree(
     watcher.makedirs(sub)
     watcher.makedirs(dst)
     with watcher.open(f"{sub}/leaf.txt", "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"leaf")
 
     # Warm from the root down so every dir id is derivable, including the
@@ -620,7 +598,6 @@ def test_changes_sync_ttl_suppresses_polling(
 
     new_file = f"{subdir}/late.txt"
     with other.open(new_file, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"later")
 
     # Give the feed time to carry the change, then confirm the TTL keeps us from
@@ -652,7 +629,6 @@ def test_changes_sync_renamed_cached_directory_drops_own_listing(
     movable = f"{root}/movable"
     watcher.makedirs(movable)
     with watcher.open(f"{movable}/leaf.txt", "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"leaf")
 
     # Warm from the root down so the movable dir's id is derivable (mapped).
@@ -695,7 +671,6 @@ def test_changes_sync_failure_serves_cache(
     subdir = _test_path("sync_fail")
     watcher.mkdir(subdir)
     with watcher.open(f"{subdir}/keep.txt", "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"keep")
     keep = f"{subdir}/keep.txt"
     watcher.ls(subdir)  # warm the cache
@@ -717,7 +692,6 @@ def test_rm_recursive_deletes_directory_tree(fs: GoogleDriveFileSystem) -> None:
     root = _test_path("tree")
     fs.makedirs(root + "/a/b")
     with fs.open(root + "/a/b/leaf", "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"leaf")
 
     fs.rm(root, recursive=True)
@@ -746,7 +720,6 @@ def test_rmdir_non_empty_raises(fs: GoogleDriveFileSystem) -> None:
     path = _test_path("nonempty_dir")
     fs.mkdir(path)
     with fs.open(path + "/child", "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"x")
 
     with pytest.raises(ValueError, match="non-empty"):
@@ -758,7 +731,6 @@ def test_read_with_seek(fs: GoogleDriveFileSystem) -> None:
     data = b"0123456789abcdef"
     filename = _test_path("seekable")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(data)
 
     with fs.open(filename, "rb") as f:
@@ -781,7 +753,6 @@ def test_multiblock_upload(fs: GoogleDriveFileSystem) -> None:
     data = b"abcd" * (block_size // 4 * 3 + 7)
     fn = _test_path("multiblock")
     with fs.open(fn, "wb", block_size=block_size) as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(data)
 
     assert fs.cat(fn) == data
@@ -855,7 +826,6 @@ def test_discard_after_partial_write(fs: GoogleDriveFileSystem) -> None:
 def test_ls_detail_includes_metadata(fs: GoogleDriveFileSystem) -> None:
     filename = _test_path("detail_check")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"meta")
 
     entries = fs.ls(TESTDIR, detail=True)
@@ -871,7 +841,6 @@ def test_nested_ls_lists_children(fs: GoogleDriveFileSystem) -> None:
     parent = _test_path("nested_parent")
     fs.mkdir(parent)
     with fs.open(parent + "/child.txt", "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"child")
 
     names = fs.ls(parent)
@@ -890,7 +859,6 @@ def test_deep_cold_path_resolves(fs: GoogleDriveFileSystem, make_fs: FsFactory) 
     leaf = f"{deep_dir}/leaf.txt"
     fs.makedirs(deep_dir)
     with fs.open(leaf, "wb") as handle:
-        # pyrefly: ignore [bad-argument-type]
         handle.write(b"deep")
 
     # A second instance starts with an empty cache, so resolution is fully cold.
@@ -939,7 +907,6 @@ def test_root_file_id_rejects_file(
     """A regular file ID must not be accepted as the filesystem root."""
     filename = _test_path("root_is_a_file")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"x")
     file_id = fs.info(filename)["id"]
 
@@ -955,7 +922,6 @@ def test_root_file_id_accepts_folder(
     folder = _test_path("root_folder")
     fs.mkdir(folder)
     with fs.open(folder + "/child", "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"data")
     folder_id = fs.info(folder)["id"]
 
@@ -1006,7 +972,6 @@ def test_info_honors_fields_with_warm_listing_cache(
     """``info(fields=...)`` must fetch from the API, not stale ``ls`` dircache."""
     filename = _test_path("info_fields")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"x")
 
     fs.ls(TESTDIR, detail=True)
@@ -1022,7 +987,6 @@ def test_ls_with_fields_bypasses_stale_cache(fs: GoogleDriveFileSystem) -> None:
     """``ls(..., fields=...)`` must refetch when the canonical cache lacks fields."""
     filename = _test_path("ls_fields")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"abc")
 
     fs.ls(TESTDIR, detail=True)
@@ -1044,7 +1008,6 @@ def test_ls_with_fields_does_not_overwrite_canonical_cache(
     """Non-canonical ``ls`` reads fresh data but leaves the default dircache unchanged."""
     filename = _test_path("ls_no_cache_pollution")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"x")
 
     fs.ls(TESTDIR, detail=True)
@@ -1062,7 +1025,6 @@ def test_rm_succeeds_after_exists_warmed_cache(fs: GoogleDriveFileSystem) -> Non
     """Regression: ``exists()`` warming dircache must not cause a false ``PermissionError`` on ``rm``."""
     filename = _test_path("rm_after_exists")
     with fs.open(filename, "wb") as f:
-        # pyrefly: ignore [bad-argument-type]
         f.write(b"delete me")
 
     assert fs.exists(filename)

@@ -7,12 +7,9 @@ from conftest import MockedDriveFS
 from googleapiclient.errors import HttpError
 from googleapiclient.http import HttpRequest
 
-from gdrive_fsspec.core import (
-    _NUM_RETRIES,
-    DIR_MIME_TYPE,
-    GoogleDriveFile,
-    GoogleDriveFileSystem,
-)
+from gdrive_fsspec._constants import _NUM_RETRIES, DIR_MIME_TYPE
+from gdrive_fsspec._file import GoogleDriveFile
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 def test_create_anon(anon_fs: GoogleDriveFileSystem) -> None:

@@ -7,7 +7,7 @@ import pytest
 from googleapiclient.errors import HttpError
 
 from gdrive_fsspec import GoogleDriveFileSystem
-from gdrive_fsspec.core import AuthMethod
+from gdrive_fsspec._constants import AuthMethod
 from gdrive_fsspec.types import FileInfo
 
 TESTDIR = "gdrive_fsspec_testdir"

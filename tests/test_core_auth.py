@@ -6,7 +6,8 @@ from unittest import mock
 
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import ROOT_ID, GoogleDriveFileSystem
+from gdrive_fsspec._constants import ROOT_ID
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 def test_anon_clears_drive() -> None:

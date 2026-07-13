@@ -9,13 +9,13 @@ import pytest
 from conftest import MockedDriveFS, empty_headers, empty_listing
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import (
+from gdrive_fsspec._constants import MultipleFilesError
+from gdrive_fsspec._file import (
     GoogleDriveFile,
-    GoogleDriveFileSystem,
-    MultipleFilesError,
     _parse_range_end,
     _with_supports_all_drives,
 )
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _fast_upload_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_authed_request`` sleeps with exponential backoff between attempts; tests
     that exercise retryable statuses would otherwise add real wall-clock delay.
     """
-    monkeypatch.setattr("gdrive_fsspec.core.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr("gdrive_fsspec._file.time.sleep", lambda *_a, **_k: None)
 
 
 def _rate_limit_403_body() -> bytes:
@@ -110,6 +110,21 @@ def test_fetch_range_with_byte_range(mocked_fs: MockedDriveFS) -> None:
     file._fetch_range(0, 3)
 
     assert media.headers["Range"] == "bytes=0-2"
+
+
+def test_fetch_range_open_ended_reads_through_eof(mocked_fs: MockedDriveFS) -> None:
+    # start set, end=None means "from offset through EOF": an open-ended HTTP
+    # range (bytes=<start>-), not a malformed bytes=<start>--1.
+    fs = mocked_fs.fs
+    media = mock.Mock()
+    media.headers = empty_headers()
+    media.execute.return_value = b"lo"
+    mocked_fs.files.get_media.return_value = media
+
+    file = _read_file(fs)
+    file._fetch_range(3, None)
+
+    assert media.headers["Range"] == "bytes=3-"
 
 
 def test_fetch_range_not_satisfiable_returns_empty(
