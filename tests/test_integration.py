@@ -510,6 +510,7 @@ def test_changes_sync_reconciles_out_of_band_move(
     start_token = watcher._get_start_page_token()
     other.service.files().update(
         fileId=file_id,
+        body={},
         addParents=dst_id,
         removeParents=src_id,
         supportsAllDrives=True,
@@ -572,6 +573,7 @@ def test_changes_sync_moved_cached_directory_drops_subtree(
     start_token = watcher._get_start_page_token()
     other.service.files().update(
         fileId=movable_id,
+        body={},
         addParents=dst_id,
         removeParents=src_id,
         supportsAllDrives=True,
