@@ -4,7 +4,11 @@
 
 import pytest
 
-from gdrive_fsspec.core import DIR_MIME_TYPE, _finfo_from_response, _normalize_path
+from gdrive_fsspec._constants import (
+    DIR_MIME_TYPE,
+    _finfo_from_response,
+    _normalize_path,
+)
 from gdrive_fsspec.utils import escape_query_str, merge_fields
 
 

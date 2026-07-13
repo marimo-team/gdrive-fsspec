@@ -31,11 +31,9 @@ import pytest
 from conftest import TESTDIR, FsFactory
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import (
-    GoogleDriveFile,
-    GoogleDriveFileSystem,
-    MultipleFilesError,
-)
+from gdrive_fsspec._constants import MultipleFilesError
+from gdrive_fsspec._file import GoogleDriveFile
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 def _test_path(name: str) -> str:

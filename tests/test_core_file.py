@@ -9,13 +9,13 @@ import pytest
 from conftest import MockedDriveFS, empty_headers, empty_listing
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import (
+from gdrive_fsspec._constants import MultipleFilesError
+from gdrive_fsspec._file import (
     GoogleDriveFile,
-    GoogleDriveFileSystem,
-    MultipleFilesError,
     _parse_range_end,
     _with_supports_all_drives,
 )
+from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _fast_upload_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_authed_request`` sleeps with exponential backoff between attempts; tests
     that exercise retryable statuses would otherwise add real wall-clock delay.
     """
-    monkeypatch.setattr("gdrive_fsspec.core.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr("gdrive_fsspec._file.time.sleep", lambda *_a, **_k: None)
 
 
 def _rate_limit_403_body() -> bytes:
