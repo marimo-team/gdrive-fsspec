@@ -213,8 +213,7 @@ ROOT_DIR = ""
 PathLike: TypeAlias = str | os.PathLike[str] | pathlib.Path
 
 
-class _PageTokenKwargs(TypedDict, total=False):
-    # Empty on the first page, ``pageToken`` on later ones.
+class _PageListKwargs(TypedDict, total=False):
     pageToken: str
 
 
@@ -483,9 +482,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         drives: list[Drive] = []
         page_token: str | None = None
         while True:
-            page_kwargs: _PageTokenKwargs = (
-                {"pageToken": page_token} if page_token else {}
-            )
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
             response = (
                 self.service.drives()
                 .list(**page_kwargs)
@@ -1285,9 +1285,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         kwargs = self._drive_kw()
         while True:
             LOGGER.debug("%s ; prefix %s", query, path_prefix)
-            page_kwargs: _PageTokenKwargs = (
-                {"pageToken": page_token} if page_token else {}
-            )
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
             response = self.files.list(
                 q=query,
                 spaces=self.spaces,
@@ -1339,9 +1340,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         matches: list[File] = []
         page_token: str | None = None
         while True:
-            page_kwargs: _PageTokenKwargs = (
-                {"pageToken": page_token} if page_token else {}
-            )
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
             response = self.files.list(
                 q=query,
                 spaces=self.spaces,
