@@ -1,3 +1,19 @@
+def escape_query_str(value: str) -> str:
+    """Escape a string literal for a Drive ``files.list`` query.
+
+    Backslashes are escaped before single quotes so the added escapes are not
+    themselves re-escaped. See
+    https://developers.google.com/workspace/drive/api/guides/search-files.
+
+    Args:
+        value: Raw string to embed inside single quotes in a query.
+
+    Returns:
+        The escaped string, safe to interpolate into ``'...'`` in a query.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def merge_fields(base: str, extra: str | None) -> str:
     """Merge two comma-separated Drive field masks, dropping duplicate tokens.
 

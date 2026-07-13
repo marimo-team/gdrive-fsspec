@@ -5,7 +5,7 @@
 import pytest
 
 from gdrive_fsspec.core import DIR_MIME_TYPE, _finfo_from_response, _normalize_path
-from gdrive_fsspec.utils import merge_fields
+from gdrive_fsspec.utils import escape_query_str, merge_fields
 
 
 @pytest.mark.parametrize(
@@ -31,6 +31,23 @@ from gdrive_fsspec.utils import merge_fields
 )
 def test_merge_fields(base: str, extra: str | None, expected: str) -> None:
     assert merge_fields(base, extra) == expected
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        # Plain names pass through unchanged.
+        ("report.txt", "report.txt"),
+        ("", ""),
+        # Single quotes are escaped for embedding in '...' literals.
+        ("it's here", "it\\'s here"),
+        # Backslashes are escaped, and before quotes so escapes aren't doubled.
+        ("back\\slash", "back\\\\slash"),
+        ("both\\'d", "both\\\\\\'d"),
+    ],
+)
+def test_escape_query_str(value: str, expected: str) -> None:
+    assert escape_query_str(value) == expected
 
 
 @pytest.mark.parametrize(

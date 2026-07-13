@@ -239,8 +239,8 @@ def test_open_wb_propagates_multiple_files_error(mocked_fs: MockedDriveFS) -> No
     # creating a third copy; surface the ambiguity instead. Drive the real
     # resolution path (dircache -> _path_to_id) rather than mocking info().
     fs.dircache["parent"] = [
-        {"name": "parent/file.txt", "id": "id-1", "type": "file"},
-        {"name": "parent/file.txt", "id": "id-2", "type": "file"},
+        {"name": "parent/file.txt", "id": "id-1", "size": 0, "type": "file"},
+        {"name": "parent/file.txt", "id": "id-2", "size": 0, "type": "file"},
     ]
 
     with pytest.raises(MultipleFilesError):

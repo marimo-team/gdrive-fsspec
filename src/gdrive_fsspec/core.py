@@ -10,7 +10,16 @@ import ssl
 import time
 import warnings
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Mapping,
+    MutableMapping,
+    TypeAlias,
+    cast,
+    overload,
+)
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httplib2
@@ -21,14 +30,15 @@ from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, build_http
+from typing_extensions import TypedDict
 
 from .types import FileInfo
 from .typing_utils import override
-from .utils import merge_fields
+from .utils import escape_query_str, merge_fields
 
 if TYPE_CHECKING:
     from googleapiclient._apis.drive.v3.resources import DriveResource
-    from googleapiclient._apis.drive.v3.schemas import Drive, File
+    from googleapiclient._apis.drive.v3.schemas import Change, Drive, File
 
     from .types import FilesResource
 
@@ -78,6 +88,26 @@ _DELETE_PERMISSION_SHARED_DRIVE_MSG = (
 _DELETE_PERMISSION_MSG = "Insufficient permissions to permanently delete the file."
 
 _NUM_RETRIES = 5
+
+# Changes.list partial-response mask. ``file`` is absent on removed changes; the
+# ``parents`` sub-field carries the file's CURRENT parent folder ids, used to map
+# a change to the cached directory listing(s) it invalidates.
+# https://developers.google.com/workspace/drive/api/reference/rest/v3/changes/list
+_CHANGES_FIELDS = (
+    "nextPageToken,newStartPageToken,"
+    "changes(changeType,removed,fileId,"
+    "file(id,name,mimeType,trashed,parents,driveId))"
+)
+_CHANGES_PAGE_SIZE = 1000
+
+# Page size for the single-name lookup in _find_child_by_name. One exact match
+# is the norm; the pages exist only to settle rare case-variant collisions
+# (Drive's name filter is case-insensitive), so a modest size bounds round-trips.
+_FIND_CHILD_PAGE_SIZE = 100
+
+# HTTP statuses returned for an expired/invalid Changes page token; recovery is
+# to re-baseline the token and drop the whole cache (the gap can't be replayed).
+_CHANGES_TOKEN_EXPIRED_STATUSES = frozenset({400, 404, 410})
 
 # Transport-level failures worth retrying on the hand-rolled resumable-upload path
 _RETRYABLE_TRANSPORT_ERRORS = (
@@ -177,9 +207,16 @@ class MultipleFilesError(FileNotFoundError):
 
 AuthMethod = Literal["anon", "browser", "cache", "service_account"]
 ROOT_ID = "root"
+ROOT_DIR = ""
 
 # One path element — matches fsspec.stringify_path
 PathLike: TypeAlias = str | os.PathLike[str] | pathlib.Path
+
+
+class _PageListKwargs(TypedDict, total=False):
+    """The ``list`` method doesn't enforce good type params, so we use a TypedDict to help."""
+
+    pageToken: str
 
 
 class GoogleDriveFileSystem(AbstractFileSystem):
@@ -201,6 +238,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         service: DriveResource
         files: FilesResource
         authed_http: AuthorizedHttp
+        # pyrefly: ignore [bad-override-mutable-attribute]  # fsspec DirCache is untyped
+        dircache: MutableMapping[str, list[FileInfo]]
+        _auth_method: AuthMethod | None
+        _is_anonymous: bool
 
     def __init__(
         self,
@@ -211,6 +252,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         creds: dict[str, Any] | str | None = None,
         drive: str | None = None,
         auth_kwargs: dict[str, Any] | None = None,
+        changes_sync_interval: float | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize a Google Drive file system.
@@ -253,6 +295,21 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 service accounts). For headless or remote environments where a
                 local callback server is unavailable, pass
                 ``use_local_webserver=False`` to request a token via the console.
+            changes_sync_interval: If set (in seconds), opt into reconciling
+                out-of-band Drive changes (files created, modified, moved,
+                trashed, or deleted by other processes or the Drive web UI) into
+                the directory-listing cache. Before a cached listing is served by
+                ``ls``/``info``, changes since the last sync are polled via the
+                Drive Changes API, at most once per interval. Affected listings
+                are dropped so they refresh on demand. ``None`` (default)
+                disables the feature entirely — no extra API calls and zero cost
+                on the read path. Requires authentication. Reconciliation is
+                best-effort: a sync failure is logged and the cached listings are
+                served unchanged rather than raising. Note: the filesystem's own
+                writes also appear in the change feed, so a directory just
+                written may be re-listed once on the next read after a sync. If a
+                sync-enabled instance is shared across threads, a sync may
+                reconcile against a slightly stale snapshot of the cache.
             **kwargs: Passed to the parent class.
         """
         # Ideally, these should be keyword-arguments, but to maintain backwards compatibility, we keep the existing API.
@@ -274,6 +331,23 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             self._validate_root_file_id(root_file_id)
 
         self.root_file_id = root_file_id or self.drive or ROOT_ID
+
+        if self._is_anonymous and changes_sync_interval is not None:
+            raise ValueError("Changes sync is not supported for anonymous access")
+
+        self._changes_sync_interval = changes_sync_interval
+        self._changes_page_token: str | None = None
+        self._last_sync_monotonic: float | None = None
+        if self._changes_sync_interval is not None:
+            # Baseline the changes token eagerly so the first cached read can already reconcile.
+            try:
+                self._changes_page_token = self._get_start_page_token()
+            except HttpError:
+                LOGGER.warning(
+                    "Could not baseline the changes token at construction; "
+                    "will retry on first sync",
+                    exc_info=True,
+                )
 
     def _validate_root_file_id(self, root_file_id: str) -> None:
         try:
@@ -338,6 +412,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             cred = self._connect_service_account()
         else:
             raise ValueError(f"Invalid connection method `{method}`.")
+
+        self._auth_method = method
+        self._is_anonymous = method == "anon"
 
         # Own the authenticated transport explicitly. Sharing the transport
         # keeps credential refresh and connection state in one place.
@@ -407,16 +484,15 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         drives: list[Drive] = []
         page_token: str | None = None
         while True:
-            if page_token is None:
-                response = (
-                    self.service.drives().list().execute(num_retries=_NUM_RETRIES)
-                )
-            else:
-                response = (
-                    self.service.drives()
-                    .list(pageToken=page_token)
-                    .execute(num_retries=_NUM_RETRIES)
-                )
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
+            response = (
+                self.service.drives()
+                .list(**page_kwargs)
+                .execute(num_retries=_NUM_RETRIES)
+            )
             drives.extend(response["drives"])
             page_token = response.get("nextPageToken")
             if page_token is None:
@@ -618,66 +694,245 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if path is None:
             self.dircache.clear()
         else:
-            self.dircache.pop(self._strip_protocol(path), None)
+            self.dircache.pop(self._path_str(path), None)
         super().invalidate_cache(path)
 
-    def export(self, path: PathLike, mime_type: str) -> bytes:
-        """Export a Google-native file to another format and download it.
+    # ----------------------------------
+    # Changes-API cache synchronization
+    # ----------------------------------
 
-        Use this for Docs, Sheets, Slides, and other Google Workspace files that
-        cannot be downloaded directly with ``open(..., "rb")``.
+    def _maybe_sync_cache(self) -> None:
+        """Cache-read hook: reconcile out-of-band changes, at most once per interval.
+
+        Best-effort: any failure is logged and swallowed so a cached ``ls``/
+        ``info`` is never turned into an error.
+        """
+        if self._changes_sync_interval is None or self._is_anonymous:
+            return
+        last = self._last_sync_monotonic
+        now = time.monotonic()
+        if last is not None and now - last < self._changes_sync_interval:
+            return
+        self._last_sync_monotonic = now
+        try:
+            self._sync_cache()
+        except Exception:
+            LOGGER.warning("Cache sync failed; serving cached listings", exc_info=True)
+
+    def _sync_cache(self) -> None:
+        """Reconcile out-of-band Drive changes into the dircache.
+
+        Drops cached listings that a change since the last sync could have made
+        stale (see :meth:`_plan_invalidations`), falling back to clearing the
+        whole cache when a change cannot be mapped or the page token expired. The
+        very first call has no page token yet and only establishes the baseline.
+        """
+        if self._changes_page_token is None:
+            self._changes_page_token = self._get_start_page_token()
+            return
+        try:
+            changes, new_token = self._iter_changes(self._changes_page_token)
+        except HttpError as err:
+            if err.status_code in _CHANGES_TOKEN_EXPIRED_STATUSES:
+                # The change gap can't be replayed; re-baseline and drop the cache.
+                LOGGER.debug(
+                    "Changes token expired (%s), error: %s, clearing cache",
+                    err.status_code,
+                    err.error_details,
+                )
+                self._changes_page_token = self._get_start_page_token()
+                self.dircache.clear()
+                return
+            raise
+
+        self._changes_page_token = new_token
+        if not changes:
+            return
+
+        dir_id_to_path = self._build_dir_id_to_path()
+        id_to_paths = self._build_id_to_paths()
+        to_invalidate, full_clear = self._plan_invalidations(
+            changes, dir_id_to_path, id_to_paths
+        )
+        if full_clear:
+            LOGGER.debug("Unmappable change; clearing dircache")
+            self.dircache.clear()
+            return
+        for path in to_invalidate:
+            self.dircache.pop(path, None)
+
+    def _get_start_page_token(self) -> str:
+        """Baseline Changes page token for this instance's corpus."""
+        kwargs: dict[str, Any] = {}
+        if self.drive is not None:
+            kwargs = dict(driveId=self.drive, supportsAllDrives=True)
+        response = (
+            self.service.changes()
+            .getStartPageToken(**kwargs)
+            .execute(num_retries=_NUM_RETRIES)
+        )
+        return response["startPageToken"]
+
+    def _iter_changes(self, page_token: str) -> tuple[list[Change], str]:
+        """Drain all changes from ``page_token``.
 
         Args:
-            path: Path of the Google-native file to export.
-            mime_type: Target MIME type for the export (e.g. ``"text/plain"``).
-                Must be one of the conversions Drive supports for this file's
-                type; see :attr:`export_formats`.
+            page_token: The saved page token to resume from.
 
         Returns:
-            Exported file content as bytes.
+            A ``(changes, new_start_token)`` pair, where ``new_start_token`` is
+            the token to persist for the next sync.
 
         Raises:
-            ValueError: If ``mime_type`` is not a supported export target for
-                this file's source type.
+            HttpError: If the token is invalid or expired (caller re-baselines).
         """
-        info = self.info(path)
-        file_id = info["id"]
-        source_mime = info.get("mimeType", "")
-        targets = self.export_formats.get(source_mime, [])
-        if mime_type not in targets:
-            valid = ", ".join(targets) if targets else "none"
-            raise ValueError(
-                f"Cannot export {path!r} (type {source_mime!r}) to {mime_type!r}. Supported export types: {valid}."
+        changes: list[Change] = []
+        new_start_token: str | None = None
+        scope = self._changes_scope_kw()
+        token: str | None = page_token
+        while token is not None:
+            response = (
+                self.service.changes()
+                .list(
+                    pageToken=token,
+                    spaces=self.spaces,
+                    includeRemoved=True,
+                    fields=_CHANGES_FIELDS,
+                    pageSize=_CHANGES_PAGE_SIZE,
+                    **scope,
+                )
+                .execute(num_retries=_NUM_RETRIES)
             )
+            changes.extend(response.get("changes", []))
+            new_start_token = response.get("newStartPageToken", new_start_token)
+            token = response.get("nextPageToken")
+        if new_start_token is None:
+            # The final page always carries newStartPageToken; treat its absence
+            # as a token to re-baseline rather than silently losing progress.
+            raise RuntimeError("changes.list returned no newStartPageToken")
+        return changes, new_start_token
 
-        request = self.files.export_media(fileId=file_id, mimeType=mime_type)
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)
-        return buffer.getvalue()
+    def _changes_scope_kw(self) -> dict[str, Any]:
+        """Drive-scoping kwargs for ``changes.list`` (empty for My Drive).
 
-    def _resolve_drive_id(self, drive: str) -> str:
-        """Resolve a shared-drive ID or name to its drive ID.
-
-        Args:
-            drive: Shared-drive ID or human-readable name.
-
-        Returns:
-            The matching shared-drive ID.
-
-        Raises:
-            ValueError: If no drive matches, or the name matches multiple drives.
+        Distinct from :meth:`_drive_kw`, which emits ``corpora`` — a
+        ``files.list`` parameter that ``changes.list`` does not accept.
         """
-        if any(d["id"] == drive for d in self.drives):
-            return drive
-        matches = [d["id"] for d in self.drives if d["name"] == drive]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) == 0:
-            raise ValueError(f"Drive {drive!r} not found by id or name")
-        raise ValueError(f"Drive name {drive!r} refers to multiple shared drives")
+        if self.drive is not None:
+            return dict(
+                driveId=self.drive,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            )
+        return {}
+
+    @cached_property
+    def _resolved_root_id(self) -> str:
+        """The real folder ID of the filesystem root.
+
+        ``root_file_id`` may be the ``"root"`` alias (My Drive), but the Drive
+        API — notably the change feed — reports the concrete folder ID. Resolve
+        the alias once via ``files.get``; a real ID (shared drive or an explicit
+        ``root_file_id``) is returned unchanged with no API call.
+        """
+        if self.root_file_id != ROOT_ID:
+            return self.root_file_id
+        meta = self.files.get(fileId=ROOT_ID, fields="id").execute(
+            num_retries=_NUM_RETRIES
+        )
+        return meta["id"]
+
+    def _build_dir_id_to_path(self) -> dict[str, str]:
+        """Map each cached directory's folder ID to its cached path.
+
+        A directory's ID is learned from the entry representing it inside its
+        parent's cached listing; the root maps to :attr:`_resolved_root_id` (the
+        concrete id, since the change feed never uses the ``"root"`` alias). A
+        cached directory whose parent is not cached has no derivable ID and is
+        absent here — see :meth:`_plan_invalidations` for how that is handled.
+        """
+        dir_id_to_path: dict[str, str] = {self._resolved_root_id: ROOT_DIR}
+        # Snapshot the cache: another thread's ls/rm/sync may mutate it, and
+        # iterating a live dict would raise "changed size during iteration".
+        for listing in list(self.dircache.values()):
+            for entry in listing:
+                if entry.get("type") == "directory" and "id" in entry:
+                    dir_id_to_path[entry["id"]] = entry["name"]
+        return dir_id_to_path
+
+    def _build_id_to_paths(self) -> dict[str, list[str]]:
+        """Map each cached file ID to the directory path(s) that list it."""
+        id_to_paths: dict[str, list[str]] = {}
+        # Snapshot the cache (see _build_dir_id_to_path).
+        for dir_path, listing in list(self.dircache.items()):
+            for entry in listing:
+                file_id = entry.get("id")
+                if file_id is not None:
+                    id_to_paths.setdefault(file_id, []).append(dir_path)
+        return id_to_paths
+
+    def _plan_invalidations(
+        self,
+        changes: list[Change],
+        dir_id_to_path: dict[str, str],
+        id_to_paths: dict[str, list[str]],
+    ) -> tuple[set[str], bool]:
+        """Decide which cached directories a batch of changes invalidates.
+
+        Returns ``(paths_to_drop, full_clear)``. A cached listing goes stale only if a
+        change touches one of its direct children, which is caught either via the
+        change's current parents (new location) or via ``id_to_paths`` (old
+        location). An unresolved parent can only endanger a cached directory
+        whose own ID is underivable, so it forces a full clear only when such an
+        unmapped directory is actually cached.
+        """
+        mapped_paths = set(dir_id_to_path.values())
+        # Snapshot the keys: a concurrent mutation must not raise mid-iteration.
+        has_unmapped_dir = any(path not in mapped_paths for path in list(self.dircache))
+
+        to_invalidate: set[str] = set()
+        for change in changes:
+            file_id = change.get("fileId")
+            # Old location: any cached dir currently listing this id may now be
+            # stale (moved out, renamed, trashed, or deleted). Fires even for a
+            # removed change, since the index is built from the pre-sync cache.
+            if file_id is not None and file_id in id_to_paths:
+                to_invalidate.update(id_to_paths[file_id])
+
+            # The changed item may itself be a cached directory that was moved,
+            # renamed, or removed. Its own listing (and everything under it) is
+            # then keyed by a now-stale path, so drop that whole subtree.
+            if file_id is not None and file_id in dir_id_to_path:
+                to_invalidate.update(self._cached_subtree(dir_id_to_path[file_id]))
+
+            file = change.get("file")
+            if change.get("removed") or file is None:
+                # No parents to inspect; the old-location step above is all we can
+                # (and need to) do for a removed or file-less change.
+                continue
+
+            # New location: each current parent that maps to a cached directory
+            # may now be stale (child added, renamed, or moved in).
+            for parent_id in file.get("parents") or []:
+                if parent_id in dir_id_to_path:
+                    to_invalidate.add(dir_id_to_path[parent_id])
+                elif has_unmapped_dir:
+                    # The parent could be a cached-but-unmapped directory we
+                    # can't identify; the only safe response is to drop everything.
+                    return set(), True
+        return to_invalidate, False
+
+    def _cached_subtree(self, path: str) -> set[str]:
+        """Cached dircache keys at ``path`` and everything nested beneath it."""
+        prefix = path + "/"
+        # Snapshot the keys so a concurrent mutation can't raise mid-iteration.
+        return {
+            key for key in list(self.dircache) if key == path or key.startswith(prefix)
+        }
+
+    # ------------------------------------------------------------------
+    # fsspec surface: listing & metadata
+    # ------------------------------------------------------------------
 
     @overload
     # pyrefly: ignore [bad-override]  # overloads diverge from base ls signature
@@ -741,64 +996,40 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         # We only check the cache for typical API calls, we avoid caching if user passes extra fields or trashed files.
         use_cache = fields is None and not trashed
 
+        # Reconcile out-of-band changes before serving anything from the cache;
+        # skipped on the non-caching paths (fields/trashed), which hit the API.
+        if use_cache:
+            self._maybe_sync_cache()
+
+        entry: FileInfo | None = None
+        if stripped_path != ROOT_DIR and not (
+            use_cache and stripped_path in self.dircache
+        ):
+            entry = self._resolve_entry(stripped_path, trashed=trashed)
+
         if use_cache and (cached := self.dircache.get(stripped_path)) is not None:
-            files: list[FileInfo] = cached
+            files = cached
+        elif entry is not None and entry["type"] != "directory":
+            # `ls` on a file returns the file's own info; never cached under
+            # the file path.
+            if fields is not None:
+                meta = self._get_file(entry["id"], fields=fields)
+                entry = _finfo_from_response(
+                    meta, path_prefix=self._parent(stripped_path)
+                )
+            files = [entry]
         else:
-            files = self._ls_uncached(
-                stripped_path, trashed=trashed, fields=fields, cache_results=use_cache
+            dir_id = entry["id"] if entry is not None else self.root_file_id
+            files = self._list_children(
+                dir_id, trashed=trashed, path_prefix=stripped_path, fields=fields
             )
+            if use_cache:
+                self.dircache[stripped_path] = files
 
         if detail:
             return files
         else:
             return sorted([file["name"] for file in files])
-
-    def _ls_uncached(
-        self,
-        stripped_path: str,
-        *,
-        trashed: bool = False,
-        fields: str | None = None,
-        cache_results: bool = True,
-    ) -> list[FileInfo]:
-        """List a path's contents from the API, populating the dircache.
-
-        Args:
-            stripped_path: The path to list.
-            trashed: If True, include trashed items in the listing.
-            fields: Extra Drive fields to request on top of the defaults.
-            cache_results: If True, set the cache for the listing.
-        """
-        if stripped_path == "":
-            # Empty path is the root directory.
-            files = self._list_directory_by_id(
-                self.root_file_id, trashed=trashed, path_prefix="", fields=fields
-            )
-            if cache_results:
-                self.dircache[stripped_path] = files
-            return files
-
-        parent = self._parent(stripped_path)
-        siblings = self.ls(parent, detail=True, trashed=trashed, fields=fields)
-        matches = [file for file in siblings if file["name"] == stripped_path]
-
-        if len(matches) == 0:
-            raise FileNotFoundError(stripped_path)
-        if len(matches) > 1:
-            raise MultipleFilesError(stripped_path)
-
-        entry = matches[0]
-        if entry["type"] != "directory":
-            # `ls` on a file returns the file's own info, and is not a directory
-            # so we don't cache it under the file path
-            return [entry]
-
-        files = self._list_directory_by_id(
-            entry["id"], trashed=trashed, path_prefix=stripped_path, fields=fields
-        )
-        if cache_results:
-            self.dircache[stripped_path] = files
-        return files
 
     @override
     def info(
@@ -835,40 +1066,70 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         # A blank mask means "no extra fields".
         fields = (fields or "").strip() or None
 
-        # info_by_id fetches fresh data, but involves an extra API call.
-        # resolve_entry uses the cache, but doesn't fetch extra fields.
-        if fields is None:
-            file_info = self._resolve_entry(stripped_path, trashed=trashed)
-        else:
-            file_info = self._info_by_id(
-                stripped_path, fields, trashed=trashed, **kwargs
+        # Resolution reads cached ancestor listings whenever trashed is False
+        # (see _resolve_entry); reconcile out-of-band changes first.
+        if not trashed:
+            self._maybe_sync_cache()
+
+        file_info = self._resolve_entry(stripped_path, trashed=trashed)
+        if fields is not None:
+            # The resolved entry only carries the default fields, so fetch the
+            # requested extras fresh via files.get — O(1) in directory size.
+            meta = self._get_file(file_info["id"], fields=fields, **kwargs)
+            file_info = _finfo_from_response(
+                meta, path_prefix=self._parent(stripped_path)
             )
         return cast(dict[str, Any], file_info)
 
-    def _info_by_id(
-        self, stripped_path: str, fields: str, *, trashed: bool = False, **kwargs: Any
-    ) -> FileInfo:
-        """Return a path's info via ``files.get`` by id, with extra ``fields``.
+    def export(self, path: PathLike, mime_type: str) -> bytes:
+        """Export a Google-native file to another format and download it.
 
-        ``files.get`` is O(1) in directory size and bypasses the listing cache,
-        so the extra fields are always fresh — unlike enriching the whole parent
-        listing, which scales with the number of siblings.
+        Use this for Docs, Sheets, Slides, and other Google Workspace files that
+        cannot be downloaded directly with ``open(..., "rb")``.
+
+        Args:
+            path: Path of the Google-native file to export.
+            mime_type: Target MIME type for the export (e.g. ``"text/plain"``).
+                Must be one of the conversions Drive supports for this file's
+                type; see :attr:`export_formats`.
+
+        Returns:
+            Exported file content as bytes.
+
+        Raises:
+            ValueError: If ``mime_type`` is not a supported export target for
+                this file's source type.
         """
-        entry = self._resolve_entry(stripped_path, trashed=trashed)
-        for reserved in ("fileId", "fields", "supportsAllDrives"):
-            kwargs.pop(reserved, None)
+        info = self.info(path)
+        file_id = info["id"]
+        source_mime = info.get("mimeType", "")
+        targets = self.export_formats.get(source_mime, [])
+        if mime_type not in targets:
+            valid = ", ".join(targets) if targets else "none"
+            raise ValueError(
+                f"Cannot export {path!r} (type {source_mime!r}) to {mime_type!r}. Supported export types: {valid}."
+            )
 
-        meta = self.files.get(
-            fileId=entry["id"],
-            fields=merge_fields(INFO_FIELDS, fields),
-            supportsAllDrives=True,
-            **kwargs,
-        ).execute(num_retries=_NUM_RETRIES)
-        parent = self._parent(stripped_path)
-        return _finfo_from_response(meta, path_prefix=parent)
+        request = self.files.export_media(fileId=file_id, mimeType=mime_type)
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)
+        return buffer.getvalue()
+
+    # ------------------------------------------------------------------
+    # Path resolution: path -> FileInfo / file ID
+    # ------------------------------------------------------------------
 
     def _resolve_entry(self, path: PathLike, *, trashed: bool = False) -> FileInfo:
-        """Resolve a path to its own FileInfo by matching it in its parent listing.
+        """Resolve a path to its FileInfo, walking down from a cached ancestor.
+
+        Starts at the deepest ancestor whose listing is cached and resolves
+        each remaining component with a targeted single-name query. Cached listings are
+        authoritative: a name missing from one raises without an API call.
+        When ``trashed`` is True the cache is skipped entirely, since cached
+        listings exclude trashed files.
 
         Args:
             path: Path to resolve.
@@ -878,30 +1139,78 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             The FileInfo for the resolved path.
 
         Raises:
-            ValueError: If called with the root path, which has no parent to
-                list — callers must handle the root themselves.
-            FileNotFoundError: If ``path`` does not exist.
+            ValueError: If called with the root path, which has no entry of
+                its own — callers must handle the root themselves.
+            FileNotFoundError: If ``path`` or any of its components does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
         stripped_path = self._path_str(path)
         if stripped_path == "":
             raise ValueError("_resolve_entry is not defined for the root path")
-        parent = self._parent(stripped_path)
-        matches = [
-            file
-            for file in self.ls(parent, detail=True, trashed=trashed)
-            if file["name"] == stripped_path
-        ]
-        if len(matches) == 0:
+        parts = stripped_path.split("/")
+
+        start = 0
+        if not trashed:
+            for i in range(len(parts) - 1, -1, -1):
+                if "/".join(parts[:i]) in self.dircache:
+                    start = i
+                    break
+
+        entry: FileInfo | None = None
+        parent_id = self.root_file_id
+        for depth in range(start, len(parts)):
+            parent_path = "/".join(parts[:depth])
+            child_path = "/".join(parts[: depth + 1])
+            listing = self.dircache.get(parent_path) if not trashed else None
+            if listing is not None:
+                matches = [f for f in listing if f["name"] == child_path]
+                if len(matches) > 1:
+                    raise MultipleFilesError(child_path)
+                entry = matches[0] if matches else None
+            else:
+                entry = self._find_child_by_name(
+                    parent_id, parts[depth], trashed=trashed, path_prefix=parent_path
+                )
+            if entry is None:
+                raise FileNotFoundError(child_path)
+            if depth < len(parts) - 1 and entry["type"] != "directory":
+                # An intermediate component is not a folder, so nothing can exist below it.
+                raise FileNotFoundError("/".join(parts[: depth + 2]))
+            parent_id = entry["id"]
+        if entry is None:
             raise FileNotFoundError(stripped_path)
-        if len(matches) > 1:
-            raise MultipleFilesError(stripped_path)
-        return matches[0]
+        return entry
 
     def _path_to_id(self, path: PathLike, trashed: bool = False) -> str:
         if self._path_str(path) == "":
             return self.root_file_id
         return self._resolve_entry(path, trashed=trashed)["id"]
+
+    def _resolve_drive_id(self, drive: str) -> str:
+        """Resolve a shared-drive ID or name to its drive ID.
+
+        Args:
+            drive: Shared-drive ID or human-readable name.
+
+        Returns:
+            The matching shared-drive ID.
+
+        Raises:
+            ValueError: If no drive matches, or the name matches multiple drives.
+        """
+        if any(d["id"] == drive for d in self.drives):
+            return drive
+        matches = [d["id"] for d in self.drives if d["name"] == drive]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) == 0:
+            raise ValueError(f"Drive {drive!r} not found by id or name")
+        raise ValueError(f"Drive name {drive!r} refers to multiple shared drives")
+
+    # ------------------------------------------------------------------
+    # ID-space Drive operations: speak in file IDs, no path knowledge
+    # (``path_prefix`` is only a naming hint for returned entries)
+    # ------------------------------------------------------------------
 
     def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:
@@ -915,53 +1224,150 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             empty: dict[str, Any] = {}
             return empty
 
-    def _list_directory_by_id(
+    def _parent_query_id(self, file_id: str) -> str:
+        """Id to use in a ``'<id>' in parents`` filter.
+
+        Substitutes the shared-drive id for the ``"root"`` alias, since a
+        shared drive's top-level folder is queried by its drive id.
+        """
+        if file_id == ROOT_ID and self.drive is not None:
+            return self.drive
+        return file_id
+
+    def _get_file(
+        self, file_id: str, *, fields: str | None = None, **kwargs: Any
+    ) -> File:
+        """Fetch a file resource by ID via ``files.get``.
+
+        Args:
+            file_id: File ID to fetch.
+            fields: Extra Drive fields to request on top of ``INFO_FIELDS``.
+            **kwargs: Additional arguments for the ``files.get`` request;
+                reserved argument names are dropped.
+
+        Returns:
+            The raw Drive file resource dict.
+        """
+        for reserved in ("fileId", "fields", "supportsAllDrives"):
+            kwargs.pop(reserved, None)
+        return self.files.get(
+            fileId=file_id,
+            fields=merge_fields(INFO_FIELDS, fields),
+            supportsAllDrives=True,
+            **kwargs,
+        ).execute(num_retries=_NUM_RETRIES)
+
+    def _list_children(
         self,
         file_id: str,
         trashed: bool = False,
         path_prefix: str | None = None,
         fields: str | None = None,
     ) -> list[FileInfo]:
+        """List every child of a folder by ID, paginating ``files.list``.
+
+        Args:
+            file_id: File ID of the folder to list.
+            trashed: If True, include trashed items in the listing.
+            path_prefix: Parent path used to build the entries' names.
+            fields: Extra Drive fields to request on top of the defaults.
+
+        Returns:
+            FileInfo entries for all children, in name order.
+        """
         all_files: list[FileInfo] = []
         page_token: str | None = None
 
         file_fields = merge_fields(INFO_FIELDS, fields)
         all_fields = f"nextPageToken, files({file_fields})"
 
-        if file_id == ROOT_ID and self.drive is not None:
-            query = f"'{self.drive}' in parents "
-        else:
-            query = f"'{file_id}' in parents "
+        query = f"'{self._parent_query_id(file_id)}' in parents "
         if not trashed:
             query += "and trashed = false "
         kwargs = self._drive_kw()
         while True:
             LOGGER.debug("%s ; prefix %s", query, path_prefix)
-            if page_token is None:
-                response = self.files.list(
-                    q=query,
-                    spaces=self.spaces,
-                    fields=all_fields,
-                    orderBy="name",
-                    pageSize=1000,
-                    **kwargs,
-                ).execute(num_retries=_NUM_RETRIES)
-            else:
-                response = self.files.list(
-                    q=query,
-                    spaces=self.spaces,
-                    fields=all_fields,
-                    pageToken=page_token,
-                    orderBy="name",
-                    pageSize=1000,
-                    **kwargs,
-                ).execute(num_retries=_NUM_RETRIES)
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
+            response = self.files.list(
+                q=query,
+                spaces=self.spaces,
+                fields=all_fields,
+                orderBy="name",
+                pageSize=1000,
+                **page_kwargs,
+                **kwargs,
+            ).execute(num_retries=_NUM_RETRIES)
             for file in response.get("files", []):
                 all_files.append(_finfo_from_response(file, path_prefix))
             page_token = response.get("nextPageToken", None)
             if page_token is None:
                 break
         return all_files
+
+    def _find_child_by_name(
+        self,
+        parent_id: str,
+        name: str,
+        *,
+        trashed: bool = False,
+        path_prefix: str | None = None,
+    ) -> FileInfo | None:
+        """Look up one child of a folder by name with a targeted query.
+
+        The Drive query language matches ``name = '...'`` case-insensitively, so results are
+        re-filtered client-side with an exact comparison; pages are consumed
+        until the match count is settled, since case-variant siblings make the
+        raw result count meaningless.
+
+        Args:
+            parent_id: File ID of the folder to search in.
+            name: Exact (case-sensitive) child name to find.
+            trashed: If True, include trashed files in the search.
+            path_prefix: Parent path used to build the returned entry's name.
+
+        Returns:
+            The child's FileInfo, or None if no child has that name.
+
+        Raises:
+            MultipleFilesError: If several children share the name.
+        """
+        query_parent = self._parent_query_id(parent_id)
+        query = f"name = '{escape_query_str(name)}' and '{query_parent}' in parents"
+        if not trashed:
+            query += " and trashed = false"
+
+        matches: list[File] = []
+        page_token: str | None = None
+        while True:
+            page_kwargs: _PageListKwargs = {}
+            if page_token:
+                page_kwargs["pageToken"] = page_token
+
+            response = self.files.list(
+                q=query,
+                spaces=self.spaces,
+                fields=f"nextPageToken, files({INFO_FIELDS})",
+                pageSize=_FIND_CHILD_PAGE_SIZE,
+                **page_kwargs,
+                **self._drive_kw(),
+            ).execute(num_retries=_NUM_RETRIES)
+            matches.extend(
+                file for file in response.get("files", []) if file["name"] == name
+            )
+            page_token = response.get("nextPageToken")
+            if page_token is None or len(matches) > 1:
+                break
+
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise MultipleFilesError(
+                _normalize_path(path_prefix, name).lstrip("/") if path_prefix else name
+            )
+        return _finfo_from_response(matches[0], path_prefix)
 
     def _trash_file(self, file_id: str, untrash: bool = False) -> File:
         """Trash or untrash a file.
