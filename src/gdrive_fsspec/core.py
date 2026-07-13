@@ -15,7 +15,7 @@ from typing import (
     overload,
 )
 
-from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
+from fsspec.spec import AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials, Credentials
 from google.oauth2 import service_account
 from google_auth_httplib2 import AuthorizedHttp
@@ -1229,6 +1229,55 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         ).execute(num_retries=_NUM_RETRIES)
         return response
 
+    @overload
+    def open(
+        self,
+        path: PathLike,
+        mode: Literal["rb", "wb"] = ...,
+        block_size: int | None = ...,
+        cache_options: dict[str, Any] | None = ...,
+        compression: None = ...,
+        **kwargs: Any,
+    ) -> GoogleDriveFile: ...
+
+    @overload
+    def open(
+        self,
+        path: PathLike,
+        mode: str = ...,
+        block_size: int | None = ...,
+        cache_options: dict[str, Any] | None = ...,
+        compression: str | None = ...,
+        **kwargs: Any,
+    ) -> Any: ...
+
+    @override
+    def open(
+        self,
+        path: PathLike,
+        mode: str = "rb",
+        block_size: int | None = None,
+        cache_options: dict[str, Any] | None = None,
+        compression: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Open a file on Google Drive.
+
+        Overrides :meth:`AbstractFileSystem.open` only to type the return value:
+        an uncompressed binary open (``"rb"``/``"wb"``) yields a concrete
+        :class:`GoogleDriveFile`, so ``read``/``write`` are statically known to
+        take and return ``bytes``. Text mode or ``compression`` fall through to
+        the base wrappers (``TextIOWrapper`` / a compression codec).
+        """
+        return super().open(
+            path,
+            mode=mode,
+            block_size=block_size,
+            cache_options=cache_options,
+            compression=compression,
+            **kwargs,
+        )
+
     @override
     def _open(
         self,
@@ -1238,7 +1287,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         autocommit: bool = True,
         cache_options: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> AbstractBufferedFile:
+    ) -> GoogleDriveFile:
         """Open a file on Google Drive, returning a buffered file object.
 
         Args:

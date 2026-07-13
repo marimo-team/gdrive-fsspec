@@ -131,12 +131,14 @@ class GoogleDriveFile(AbstractBufferedFile):
 
         super().__init__(fs, path, mode, block_size, autocommit=autocommit, **kwargs)
 
+        # Always define _media_object so it is not a branch-conditional attribute;
+        # it is only ever populated (lazily) on the read path in _fetch_range.
+        self._media_object: Any | None = None
         if mode == "wb":
             self.location = None
             self.file_id: str | None = existing_id
         else:
             self.file_id = fs._path_to_id(path)
-            self._media_object: Any | None = None
 
     @override
     def _fetch_range(self, start: int | None = None, end: int | None = None) -> bytes:
@@ -150,6 +152,10 @@ class GoogleDriveFile(AbstractBufferedFile):
             Requested byte range, or empty bytes if the range is not satisfiable.
         """
 
+        if self.file_id is None:
+            # _fetch_range only runs on read-mode files, whose id is resolved in
+            # __init__; guard the invariant rather than send fileId=None.
+            raise RuntimeError("cannot fetch range before the file id is resolved")
         if self._media_object is None:
             self._media_object = self.fs.files.get_media(
                 fileId=self.file_id, supportsAllDrives=True
@@ -236,11 +242,15 @@ class GoogleDriveFile(AbstractBufferedFile):
         data = self.buffer.getvalue()
         head = {}
         length = len(data)
+        # fsspec drives the write path after setting ``offset`` (to an int) and
+        # calling ``_initiate_upload`` (which sets ``location``).
+        if self.offset is None:
+            raise RuntimeError("upload chunk before offset was initialized")
+        if self.location is None:
+            raise RuntimeError("upload chunk before _initiate_upload set the location")
         if final and self.autocommit:
             if length:
-                # pyrefly: ignore [unsupported-operation]
                 part = "%i-%i" % (self.offset, self.offset + length - 1)
-                # pyrefly: ignore [unsupported-operation]
                 head["Content-Range"] = "bytes %s/%i" % (part, self.offset + length)
             else:
                 # closing when buffer is empty
@@ -249,14 +259,12 @@ class GoogleDriveFile(AbstractBufferedFile):
         else:
             head["Content-Range"] = "bytes %i-%i/*" % (
                 self.offset,
-                # pyrefly: ignore [unsupported-operation]
                 self.offset + length - 1,
             )
         head.update(
             {"Content-Type": "application/octet-stream", "Content-Length": str(length)}
         )
         response, body = self._authed_request(
-            # pyrefly: ignore [unsupported-operation]
             self.location + "&supportsAllDrives=true",
             "PUT",
             body=data,
