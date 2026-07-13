@@ -696,23 +696,18 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     # ----------------------------------
 
     def _maybe_sync_cache(self) -> None:
-        """Cache-read hook: reconcile changes at most once per interval.
+        """Cache-read hook: reconcile out-of-band changes, at most once per interval.
 
-        Reconciliation is best-effort: a sync failure must never turn an
-        otherwise-serviceable ``ls``/``info`` into an error. Any failure is
-        logged and swallowed, leaving the (possibly stale) cache in place; the
-        TTL was already stamped, so this does not hot-loop on repeated reads.
+        Best-effort: any failure is logged and swallowed so a cached ``ls``/
+        ``info`` is never turned into an error.
         """
         if self._changes_sync_interval is None or self._is_anonymous:
-            # Disabled, or reconnected to anonymous credentials after enabling
-            # sync (the Changes API requires authentication).
             return
+        last = self._last_sync_monotonic
         now = time.monotonic()
-        if (
-            self._last_sync_monotonic is not None
-            and now - self._last_sync_monotonic < self._changes_sync_interval
-        ):
+        if last is not None and now - last < self._changes_sync_interval:
             return
+        self._last_sync_monotonic = now
         try:
             self._sync_cache()
         except Exception:
@@ -723,20 +718,12 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         Drops cached listings that a change since the last sync could have made
         stale (see :meth:`_plan_invalidations`), falling back to clearing the
-        whole cache when a change cannot be mapped or the page token expired.
-        The very first call only baselines the token.
+        whole cache when a change cannot be mapped or the page token expired. The
+        very first call has no page token yet and only establishes the baseline.
         """
         if self._changes_page_token is None:
-            # Lazy baseline: there is nothing to reconcile before the first token,
-            # so do NOT stamp the TTL clock — the next read should perform the
-            # first real reconciliation immediately.
             self._changes_page_token = self._get_start_page_token()
             return
-
-        # Stamp before reconciling so a mid-flight failure still honors the TTL
-        # and repeated reads do not hammer the API.
-        self._last_sync_monotonic = time.monotonic()
-
         try:
             changes, new_token = self._iter_changes(self._changes_page_token)
         except HttpError as err:

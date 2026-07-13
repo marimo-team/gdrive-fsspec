@@ -1189,21 +1189,20 @@ def _enable_sync(fs: GoogleDriveFileSystem, interval: float = 60) -> None:
     fs.__dict__.setdefault("_resolved_root_id", fs.root_file_id)
 
 
-def test_first_sync_baselines_only(mocked_fs: MockedDriveFS) -> None:
+def test_first_read_baselines_only(mocked_fs: MockedDriveFS) -> None:
+    # With no page token yet, the first read establishes the baseline and
+    # reconciles nothing (the change feed is not polled).
     fs = mocked_fs.fs
-    fs._changes_sync_interval = 60
+    _enable_sync(fs)
     fs._changes_page_token = None
     list_request, _ = _mock_changes(mocked_fs.service, [])
     fs.dircache["d"] = [_file("d/x", "x-id")]
 
-    fs._sync_cache()
+    fs._maybe_sync_cache()
 
     assert fs._changes_page_token == "TOK0"
     list_request.execute.assert_not_called()
     assert fs.dircache["d"] == [_file("d/x", "x-id")]
-    # A baseline-only call must NOT consume the TTL window: the next read has to
-    # perform the first real reconciliation immediately.
-    assert fs._last_sync_monotonic is None
 
 
 def test_resolved_root_id_resolves_alias(mocked_fs: MockedDriveFS) -> None:
@@ -1678,11 +1677,11 @@ def test_sync_shared_drive_scope(mocked_fs: MockedDriveFS) -> None:
 def test_sync_my_drive_scope_omits_drive_id(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.drive = None
+    _enable_sync(fs)
     fs._changes_page_token = None
-    fs._changes_sync_interval = 60
     _mock_changes(mocked_fs.service, [])
 
-    fs._sync_cache()  # baselines
+    fs._maybe_sync_cache()  # baselines
 
     start_kwargs = (
         mocked_fs.service.changes.return_value.getStartPageToken.call_args.kwargs
@@ -1713,6 +1712,53 @@ def test_maybe_sync_dormant_when_anonymous(mocked_fs: MockedDriveFS) -> None:
     fs.info("d/x")
 
     mocked_fs.service.changes.assert_not_called()
+
+
+def test_maybe_sync_failed_baseline_gates_next_read(mocked_fs: MockedDriveFS) -> None:
+    # A failing lazy baseline must still consume the TTL window, so repeated
+    # reads do not hot-loop retrying (and log-spamming) the baseline call.
+    fs = mocked_fs.fs
+    _enable_sync(fs)
+    fs._changes_page_token = None  # force the lazy-baseline path
+    fs.dircache["d"] = [_file("d/x", "x-id")]
+    _, start_request = _mock_changes(mocked_fs.service, [])
+    start_request.execute.side_effect = _changes_http_error(500)
+
+    with mock.patch(
+        "gdrive_fsspec.core.time.monotonic", side_effect=[100.0, 100.0, 130.0, 130.0]
+    ):
+        fs.ls("d")  # baseline attempt fails, but the TTL is stamped
+        fs.ls("d")  # within the window -> must NOT retry
+
+    # Only the first read attempted the baseline; the second was gated.
+    start_request.execute.assert_called_once()
+    assert fs.ls("d") == ["d/x"]  # cache still served throughout
+
+
+def test_maybe_sync_baseline_gates_like_any_attempt(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # The baseline is a sync attempt like any other: it stamps the interval
+    # clock, so a read within the window does not immediately re-sync. The first
+    # reconciliation happens on the first read past the interval.
+    fs = mocked_fs.fs
+    _enable_sync(fs)
+    fs._changes_page_token = None  # first read baselines
+    fs.dircache["d"] = [_file("d/x", "x-id")]
+    list_request, _ = _mock_changes(
+        mocked_fs.service, [{"newStartPageToken": "T2", "changes": []}]
+    )
+
+    with mock.patch(
+        "gdrive_fsspec.core.time.monotonic", side_effect=[100.0, 101.0, 200.0]
+    ):
+        fs.ls("d")  # baselines (TOK0) and stamps the clock at t=100
+        assert fs._changes_page_token == "TOK0"
+        fs.ls("d")  # t=101, within the 60s interval -> gated, no reconcile
+        list_request.execute.assert_not_called()
+        fs.ls("d")  # t=200, past the interval -> first reconciliation runs
+
+    list_request.execute.assert_called_once()
 
 
 def test_maybe_sync_ttl_gates_second_call(mocked_fs: MockedDriveFS) -> None:

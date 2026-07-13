@@ -314,11 +314,13 @@ def _await_change_for(
 
     Returns that single change. Scans the whole (account-wide, eventually
     consistent) feed and picks out the one for ``file_id``, so unrelated
-    concurrent changes are ignored.
+    concurrent changes are ignored. Each poll re-reads from the ORIGINAL
+    ``start_token`` rather than advancing to the returned ``newStartPageToken``:
+    the feed is eventually consistent, so advancing could move past a change
+    that occurred before the token but only becomes visible on a later poll.
     """
-    token = start_token
     for _ in range(_SYNC_RETRIES):
-        changes, token = fs._iter_changes(token)
+        changes, _ = fs._iter_changes(start_token)
         for change in changes:
             if change.get("fileId") == file_id:
                 return cast("dict[str, Any]", change)
