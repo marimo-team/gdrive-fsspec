@@ -1,5 +1,3 @@
-"""Buffered file object for Google Drive reads and hand-rolled resumable uploads."""
-
 from __future__ import annotations
 
 import io
