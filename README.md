@@ -108,7 +108,10 @@ with fs.open("notes/meeting.gdoc", "rb") as f:
 with fs.open("notes/meeting.gdoc", "rb", export_mime_type="application/pdf") as f:
     pdf_bytes = f.read()
 
-# Or export explicitly. Omit mime_type to use the default.
+# Or export explicitly. Omit mime_type to use the default for the file type.
+xlsx_bytes = fs.export("data/sheet.gsheet")
+
+# Pass a mime_type to override the default.
 csv_bytes = fs.export("data/sheet.gsheet", "text/csv")
 ```
 

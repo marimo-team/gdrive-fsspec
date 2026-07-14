@@ -85,8 +85,6 @@ def _parse_range_end(range_header: str | None) -> int | None:
 
 
 class GoogleDriveFile(AbstractBufferedFile):
-    location: str | None
-
     def __init__(
         self,
         fs: GoogleDriveFileSystem,
@@ -170,13 +168,13 @@ class GoogleDriveFile(AbstractBufferedFile):
             **kwargs,
         )
 
-        # Populated only for Google-native files
-        self._native_data: bytes | None = native_data
-        # Always define _media_object so it is not a branch-conditional attribute;
-        # it is only ever populated (lazily) on the read path in _fetch_range.
+        self._native_data: bytes | None = native_data  # Google-native files only
+        # Defined unconditionally so neither is branch-conditional: _media_object
+        # is set lazily on the read path (_fetch_range); location is the
+        # resumable-upload URI set by _initiate_upload on the write path.
         self._media_object: Any | None = None
+        self.location: str | None = None
         if mode == "wb":
-            self.location = None
             self.file_id: str | None = existing_id
         else:
             self.file_id = read_id
