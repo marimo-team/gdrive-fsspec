@@ -28,6 +28,7 @@ from ._constants import (
     _CHANGES_FIELDS,
     _CHANGES_PAGE_SIZE,
     _CHANGES_TOKEN_EXPIRED_STATUSES,
+    _DEFAULT_EXPORT_MIME_PREFERENCES,
     _DELETE_PERMISSION_MSG,
     _DELETE_PERMISSION_SHARED_DRIVE_MSG,
     _FIND_CHILD_PAGE_SIZE,
@@ -36,6 +37,7 @@ from ._constants import (
     _TRASH_PERMISSION_SHARED_DRIVE_MSG,
     DEFAULT_BLOCK_SIZE,
     DIR_MIME_TYPE,
+    GOOGLE_APPS_MIME_PREFIX,
     INFO_FIELDS,
     LOGGER,
     ROOT_DIR,
@@ -941,7 +943,79 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             )
         return file_info
 
-    def export(self, path: PathLike, mime_type: str) -> bytes:
+    @staticmethod
+    def _is_google_native(mime_type: str) -> bool:
+        """Whether ``mime_type`` is an exportable Google Workspace file type.
+
+        Google-native files (Docs, Sheets, Slides, ...) share
+        :data:`GOOGLE_APPS_MIME_PREFIX` and must be exported rather than
+        downloaded. Folders share the prefix but are not documents, so they are
+        excluded.
+
+        See https://developers.google.com/workspace/drive/api/guides/handle-errors#file-not-downloadable
+        https://developers.google.com/workspace/drive/api/guides/manage-downloads
+        """
+        return (
+            mime_type.startswith(GOOGLE_APPS_MIME_PREFIX) and mime_type != DIR_MIME_TYPE
+        )
+
+    def _resolve_export_mime(self, source_mime: str, requested: str | None) -> str:
+        """Resolve the export target MIME type for a Google-native source type.
+
+        When ``requested`` is given it must be one of the conversions Drive
+        advertises for ``source_mime``. When it is ``None`` a sensible default
+        is chosen from :data:`_DEFAULT_EXPORT_MIME_PREFERENCES`, falling back to
+        the first advertised target.
+
+        Raises:
+            ValueError: If ``requested`` is unsupported, or (when defaulting)
+                the source type has no export formats at all.
+        """
+        targets = self.export_formats.get(source_mime, [])
+
+        if requested is not None:
+            if requested in targets:
+                return requested
+            valid = ", ".join(targets) if targets else "none"
+            raise ValueError(
+                f"Cannot export a {source_mime!r} file to {requested!r}. "
+                f"Supported export types: {valid}."
+            )
+
+        for preferred in _DEFAULT_EXPORT_MIME_PREFERENCES.get(source_mime, ()):
+            if preferred in targets:
+                LOGGER.debug(
+                    "Using default export mime type %s for %s", preferred, source_mime
+                )
+                return preferred
+
+        LOGGER.debug("No default export mime type found for %s", source_mime)
+        if targets:
+            LOGGER.debug(
+                "Following mime types available: %s. Choosing first: %s",
+                targets,
+                targets[0],
+            )
+            return targets[0]
+
+        raise ValueError(
+            f"Cannot export a {source_mime!r} file: no export formats are available."
+        )
+
+    def _export_media(self, file_id: str, mime_type: str) -> bytes:
+        """Stream a Google-native file's export to bytes.
+
+        Will raise an error if mime_type is not supported.
+        """
+        request = self.files.export_media(fileId=file_id, mimeType=mime_type)
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)
+        return buffer.getvalue()
+
+    def export(self, path: PathLike, mime_type: str | None = None) -> bytes:
         """Export a Google-native file to another format and download it.
 
         Use this for Docs, Sheets, Slides, and other Google Workspace files that
@@ -951,32 +1025,20 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             path: Path of the Google-native file to export.
             mime_type: Target MIME type for the export (e.g. ``"text/plain"``).
                 Must be one of the conversions Drive supports for this file's
-                type; see :attr:`export_formats`.
+                type; see :attr:`export_formats`. When omitted, a sensible
+                default is chosen for the file's type.
 
         Returns:
             Exported file content as bytes.
 
         Raises:
             ValueError: If ``mime_type`` is not a supported export target for
-                this file's source type.
+                this file's source type, or if no default is available.
         """
         info = self.info(path)
-        file_id = info["id"]
         source_mime = info.get("mimeType", "")
-        targets = self.export_formats.get(source_mime, [])
-        if mime_type not in targets:
-            valid = ", ".join(targets) if targets else "none"
-            raise ValueError(
-                f"Cannot export {path!r} (type {source_mime!r}) to {mime_type!r}. Supported export types: {valid}."
-            )
-
-        request = self.files.export_media(fileId=file_id, mimeType=mime_type)
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)
-        return buffer.getvalue()
+        target_mime = self._resolve_export_mime(source_mime, mime_type)
+        return self._export_media(info["id"], target_mime)
 
     # ------------------------------------------------------------------
     # Path resolution: path -> FileInfo / file ID
@@ -1300,6 +1362,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         block_size: int | None = None,
         autocommit: bool = True,
         cache_options: dict[str, Any] | None = None,
+        export_mime_type: str | None = None,
         **kwargs: Any,
     ) -> GoogleDriveFile:
         """Open a file on Google Drive, returning a buffered file object.
@@ -1310,6 +1373,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             block_size: Buffer size in bytes; defaults to ``DEFAULT_BLOCK_SIZE``.
             autocommit: If True, commit the upload when the file is closed.
             cache_options: Options forwarded to the read-ahead cache.
+            export_mime_type: For Google-native files opened in read mode, the
+                MIME type to export to. Defaults to a sensible per-type target.
             **kwargs: Passed to :class:`GoogleDriveFile`.
 
         Returns:
@@ -1322,5 +1387,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             block_size=block_size if block_size is not None else DEFAULT_BLOCK_SIZE,
             autocommit=autocommit,
             cache_options=cache_options,
+            export_mime_type=export_mime_type,
             **kwargs,
         )

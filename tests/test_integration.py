@@ -1031,3 +1031,99 @@ def test_rm_succeeds_after_exists_warmed_cache(fs: GoogleDriveFileSystem) -> Non
     fs.rm(filename)
 
     assert not fs.exists(filename)
+
+
+# ---------------------------------------------------------------------------
+# Google-native files (Docs/Sheets/Slides): read via automatic export (#25).
+#
+# open("rb")/cat/get cannot download these directly — get_media returns
+# 403 fileNotDownloadable — so the file is materialized via files.export. They
+# are created here by *importing* convertible content (text/CSV) under a
+# Google-native target MIME type, since open("wb") only writes opaque binaries.
+# ---------------------------------------------------------------------------
+
+_DOC_MIME = "application/vnd.google-apps.document"
+_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+
+
+def _import_native(
+    fs: GoogleDriveFileSystem,
+    name: str,
+    target_mime: str,
+    content: bytes,
+    source_mime: str,
+) -> str:
+    """Create a Google-native file by importing convertible content.
+
+    Uploads ``content`` with a Google-native ``target_mime`` so Drive converts
+    it into a real Doc/Sheet/etc. Returns the new file's id; the file lands in
+    ``TESTDIR`` (cleaned up by the fixture) and the cache is invalidated so it
+    resolves by path afterwards.
+    """
+    from googleapiclient.http import MediaInMemoryUpload
+
+    parent_id = fs._path_to_id(TESTDIR)
+    media = MediaInMemoryUpload(content, mimetype=source_mime, resumable=False)
+    created = fs.files.create(
+        body={"name": name, "mimeType": target_mime, "parents": [parent_id]},
+        media_body=media,
+        supportsAllDrives=True,
+        fields="id",
+    ).execute()
+    fs.invalidate_cache()
+    return created["id"]
+
+
+@pytest.mark.integration
+def test_native_doc_reads_via_export(fs: GoogleDriveFileSystem) -> None:
+    """A Google Doc reads through open()/cat via an automatic text export."""
+    _import_native(
+        fs, "note", _DOC_MIME, b"Hello native export integration", "text/plain"
+    )
+    path = _test_path("note")
+
+    assert fs.info(path)["mimeType"] == _DOC_MIME
+    # Default export for a Doc is text/plain; the imported text round-trips
+    # (allowing for an added BOM/trailing newline, hence a substring check).
+    with fs.open(path, "rb") as handle:
+        data = handle.read()
+    assert b"Hello native export integration" in data
+    assert handle.size == len(data)
+    # cat goes through the same read path.
+    assert b"Hello native export integration" in fs.cat(path)
+
+
+@pytest.mark.integration
+def test_native_doc_export_pdf(fs: GoogleDriveFileSystem) -> None:
+    """A Doc exports to PDF via both fs.export() and the open() kwarg."""
+    _import_native(fs, "pdf_doc", _DOC_MIME, b"pdf me", "text/plain")
+    path = _test_path("pdf_doc")
+
+    pdf = fs.export(path, "application/pdf")
+    assert pdf.startswith(b"%PDF")
+
+    with fs.open(path, "rb", export_mime_type="application/pdf") as handle:
+        assert handle.read().startswith(b"%PDF")
+
+
+@pytest.mark.integration
+def test_native_sheet_defaults_to_xlsx(fs: GoogleDriveFileSystem) -> None:
+    """A Sheet defaults to XLSX (not CSV, which would drop all but sheet 1)."""
+    _import_native(fs, "grid", _SHEET_MIME, b"a,b,c\n1,2,3\n", "text/csv")
+    path = _test_path("grid")
+
+    with fs.open(path, "rb") as handle:
+        data = handle.read()
+    # XLSX is a zip container ("PK" magic); CSV would be plain text.
+    assert data[:2] == b"PK"
+    assert handle.size == len(data)
+
+
+@pytest.mark.integration
+def test_native_unsupported_export_mime_raises(fs: GoogleDriveFileSystem) -> None:
+    """Requesting an export target Drive does not offer raises a clear error."""
+    _import_native(fs, "bad_export", _DOC_MIME, b"x", "text/plain")
+    path = _test_path("bad_export")
+
+    with pytest.raises(ValueError, match="Supported export types"):
+        fs.open(path, "rb", export_mime_type="image/png")

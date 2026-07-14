@@ -24,6 +24,30 @@ SCOPE_DICT = {
 
 # https://developers.google.com/workspace/drive/api/guides/mime-types
 DIR_MIME_TYPE = "application/vnd.google-apps.folder"
+# Google Workspace ("Google-native") files (Docs, Sheets, Slides, ...) share this MIME prefix.
+GOOGLE_APPS_MIME_PREFIX = "application/vnd.google-apps."
+
+# Preferred export target per Google-native source type, most-preferred first.
+_DEFAULT_EXPORT_MIME_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "application/vnd.google-apps.document": (
+        "text/plain",
+        "application/pdf",
+    ),
+    # Spreadsheets default to XLSX rather than CSV because CSV exports only the first sheet
+    "application/vnd.google-apps.spreadsheet": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv",
+    ),
+    "application/vnd.google-apps.presentation": (
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ),
+    "application/vnd.google-apps.drawing": (
+        "image/png",
+        "application/pdf",
+    ),
+    "application/vnd.google-apps.script": ("application/vnd.google-apps.script+json",),
+}
 
 # Base URL for resumable uploads.
 UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"

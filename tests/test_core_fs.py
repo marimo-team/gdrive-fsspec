@@ -782,7 +782,6 @@ def test_resolve_entry_intermediate_file_raises(
 
 def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs._path_to_id = mock.Mock(return_value="file-id")
     fs.info = mock.Mock(
         return_value={"id": "file-id", "size": 0, "type": "file", "name": "file.txt"}
     )
@@ -790,7 +789,8 @@ def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None
     opened = GoogleDriveFile(fs, pathlib.PurePosixPath("file.txt"), mode="rb")
 
     assert opened.path == "file.txt"
-    fs._path_to_id.assert_called_once_with("file.txt")
+    assert opened.file_id == "file-id"
+    fs.info.assert_called_once_with("file.txt")
 
 
 def test_ls_file_resolves_directly(anon_fs: GoogleDriveFileSystem) -> None:
@@ -1124,6 +1124,86 @@ def test_export_formats_queries_about_resource(mocked_fs: MockedDriveFS) -> None
     mocked_fs.service.about.reset_mock()
     assert fs.export_formats == expected
     mocked_fs.service.about.assert_not_called()
+
+
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@pytest.mark.parametrize(
+    "mime_type, expected",
+    [
+        (DOC_MIME, True),
+        (SHEET_MIME, True),
+        (DIR_MIME_TYPE, False),  # folders share the prefix but are not documents
+        ("text/plain", False),
+        ("application/pdf", False),
+    ],
+)
+def test_is_google_native(
+    mocked_fs: MockedDriveFS, mime_type: str, expected: bool
+) -> None:
+    assert mocked_fs.fs._is_google_native(mime_type) is expected
+
+
+def test_resolve_export_mime_defaults_to_preference(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    _set_export_formats(fs, {DOC_MIME: ["application/pdf", "text/plain"]})
+    # text/plain is preferred over pdf for Docs regardless of API ordering.
+    assert fs._resolve_export_mime(DOC_MIME, None) == "text/plain"
+
+
+def test_resolve_export_mime_spreadsheet_avoids_csv_data_loss(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # CSV comes first from the API but only exports the first sheet; XLSX is the
+    # data-safe default.
+    _set_export_formats(fs, {SHEET_MIME: ["text/csv", XLSX_MIME]})
+    assert fs._resolve_export_mime(SHEET_MIME, None) == XLSX_MIME
+
+
+def test_resolve_export_mime_falls_back_to_first_target(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # No preference matches an unknown native type: use the first advertised.
+    _set_export_formats(fs, {"application/vnd.google-apps.jam": ["application/pdf"]})
+    assert (
+        fs._resolve_export_mime("application/vnd.google-apps.jam", None)
+        == "application/pdf"
+    )
+
+
+def test_resolve_export_mime_no_targets_raises(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    _set_export_formats(fs, {})
+    with pytest.raises(ValueError, match="no export formats"):
+        fs._resolve_export_mime("application/vnd.google-apps.form", None)
+
+
+def test_export_without_mime_type_uses_default(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value={"id": "doc-id", "mimeType": DOC_MIME})
+    _set_export_formats(fs, {DOC_MIME: ["application/pdf", "text/plain"]})
+
+    def fake_downloader(buffer: Any, req: Any) -> mock.Mock:
+        downloader = mock.Mock()
+
+        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
+            buffer.write(b"defaulted")
+            return mock.Mock(), True
+
+        downloader.next_chunk.side_effect = next_chunk
+        return downloader
+
+    with mock.patch("gdrive_fsspec.core.MediaIoBaseDownload", fake_downloader):
+        result = fs.export("doc.gdoc")
+
+    assert result == b"defaulted"
+    mocked_fs.files.export_media.assert_called_once_with(
+        fileId="doc-id", mimeType="text/plain"
+    )
 
 
 # ---------------------------------------------------------------------------
