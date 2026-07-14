@@ -95,6 +95,25 @@ fs = GoogleDriveFileSystem(token="anon")
 
 See the ``GoogleDriveFileSystem`` docstring for `root_file_id`, `access`, `spaces`, and other options.
 
+## Google-native files (Docs, Sheets, Slides)
+
+Google Workspace files have no binary content and cannot be downloaded directly; they must be *exported* to another format. `gdrive-fsspec` does this transparently: opening one for reading exports it to a sensible default format (Docs → `text/plain`, Sheets → `xlsx`, Slides/Drawings → PDF).
+
+```python
+# Reads the doc's text via an automatic export.
+with fs.open("notes/meeting.gdoc", "rb") as f:
+    print(f.read().decode())
+
+# Choose a specific export format.
+with fs.open("notes/meeting.gdoc", "rb", export_mime_type="application/pdf") as f:
+    pdf_bytes = f.read()
+
+# Or export explicitly. Omit mime_type to use the default.
+csv_bytes = fs.export("data/sheet.gsheet", "text/csv")
+```
+
+The valid targets for each file type are available via `fs.export_formats`. Note that exporting a multi-sheet spreadsheet to `text/csv` only yields the first sheet, which is why `xlsx` is the default.
+
 ## Installation
 
 ```sh

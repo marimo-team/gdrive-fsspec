@@ -158,6 +158,190 @@ def test_fetch_range_propagates_other_http_errors(
         file._fetch_range()
 
 
+# ---------------------------------------------------------------------------
+# Google-native (Docs/Sheets/Slides) read path
+# ---------------------------------------------------------------------------
+
+DOC_MIME = "application/vnd.google-apps.document"
+
+
+def _fake_downloader(data: bytes) -> Any:
+    """A ``MediaIoBaseDownload`` replacement that writes ``data`` in one chunk."""
+
+    def factory(buffer: io.BytesIO, request: Any) -> mock.Mock:
+        downloader = mock.Mock()
+
+        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
+            buffer.write(data)
+            return mock.Mock(), True
+
+        downloader.next_chunk.side_effect = next_chunk
+        return downloader
+
+    return factory
+
+
+def _open_native(
+    mocked_fs: MockedDriveFS,
+    data: bytes = b"exported text",
+    mime: str = DOC_MIME,
+    export_formats: dict[str, list[str]] | None = None,
+    export_mime_type: str | None = None,
+    **file_kwargs: Any,
+) -> GoogleDriveFile:
+    """Open a Google-native file, mocking the export stream during __init__."""
+    fs = mocked_fs.fs
+    fs.__dict__["export_formats"] = (
+        export_formats
+        if export_formats is not None
+        else {DOC_MIME: ["text/plain", "application/pdf"]}
+    )
+    fs.info = mock.Mock(
+        return_value={
+            "id": "doc-id",
+            "size": 0,
+            "type": "file",
+            "name": "doc",
+            "mimeType": mime,
+        }
+    )
+    mocked_fs.files.export_media.return_value = mock.Mock()
+    with mock.patch("gdrive_fsspec.core.MediaIoBaseDownload", _fake_downloader(data)):
+        return GoogleDriveFile(
+            fs,
+            "doc",
+            mode="rb",
+            export_mime_type=export_mime_type,
+            **file_kwargs,
+        )
+
+
+def test_native_file_read_returns_exported_content(mocked_fs: MockedDriveFS) -> None:
+    file = _open_native(mocked_fs, data=b"exported text")
+
+    # size reflects the materialized export, not the (absent) Drive size of 0.
+    assert file.size == len(b"exported text")
+    assert file.read() == b"exported text"
+    # Default target for a Doc is text/plain; get_media is never used.
+    mocked_fs.files.export_media.assert_called_once_with(
+        fileId="doc-id", mimeType="text/plain"
+    )
+    mocked_fs.files.get_media.assert_not_called()
+
+
+def test_native_file_partial_read_slices_buffer(mocked_fs: MockedDriveFS) -> None:
+    file = _open_native(mocked_fs, data=b"abcdefghij")
+
+    assert file.read(4) == b"abcd"
+    assert file.read() == b"efghij"
+
+
+def test_native_file_empty_export_returns_empty(mocked_fs: MockedDriveFS) -> None:
+    # An empty Google-native document exports to zero bytes; the read must
+    # succeed (return b"") rather than error, and must still go through export
+    # rather than get_media.
+    file = _open_native(mocked_fs, data=b"")
+
+    assert file.size == 0
+    assert file.read() == b""
+    mocked_fs.files.export_media.assert_called_once_with(
+        fileId="doc-id", mimeType="text/plain"
+    )
+    mocked_fs.files.get_media.assert_not_called()
+
+
+def test_native_file_seek_then_read(mocked_fs: MockedDriveFS) -> None:
+    file = _open_native(mocked_fs, data=b"0123456789")
+
+    file.seek(3)
+    assert file.read(2) == b"34"
+    assert file.read() == b"56789"
+
+
+def test_native_file_defaults_to_none_cache(mocked_fs: MockedDriveFS) -> None:
+    # A fully materialized export needs no read-ahead; the file uses the no-op
+    # cache so it does not copy the buffer into a readahead block.
+    file = _open_native(mocked_fs, data=b"abcdefghij")
+
+    assert file.cache.name == "none"
+    assert file.read() == b"abcdefghij"
+
+
+def test_native_file_respects_explicit_cache_type(mocked_fs: MockedDriveFS) -> None:
+    # An explicit cache_type is honored (and reads are still correct), proving
+    # the buffer-slicing fetch works regardless of the cache implementation.
+    file = _open_native(mocked_fs, data=b"abcdefghij", cache_type="readahead")
+
+    assert file.cache.name == "readahead"
+    assert file.read(4) == b"abcd"
+    assert file.read() == b"efghij"
+
+
+def test_native_file_honors_explicit_export_mime(mocked_fs: MockedDriveFS) -> None:
+    file = _open_native(mocked_fs, data=b"%PDF-1.4", export_mime_type="application/pdf")
+
+    assert file.read() == b"%PDF-1.4"
+    mocked_fs.files.export_media.assert_called_once_with(
+        fileId="doc-id", mimeType="application/pdf"
+    )
+
+
+def test_open_threads_export_mime_type(mocked_fs: MockedDriveFS) -> None:
+    # fs.open() -> _open() must forward export_mime_type all the way to the
+    # export call; the direct GoogleDriveFile tests above bypass _open, so this
+    # guards the public entry-point wiring.
+    fs = mocked_fs.fs
+    fs.__dict__["export_formats"] = {DOC_MIME: ["text/plain", "application/pdf"]}
+    fs.info = mock.Mock(
+        return_value={
+            "id": "doc-id",
+            "size": 0,
+            "type": "file",
+            "name": "doc",
+            "mimeType": DOC_MIME,
+        }
+    )
+    mocked_fs.files.export_media.return_value = mock.Mock()
+
+    with mock.patch(
+        "gdrive_fsspec.core.MediaIoBaseDownload", _fake_downloader(b"%PDF-1.4")
+    ):
+        with fs.open("doc", "rb", export_mime_type="application/pdf") as handle:
+            assert handle.read() == b"%PDF-1.4"
+
+    mocked_fs.files.export_media.assert_called_once_with(
+        fileId="doc-id", mimeType="application/pdf"
+    )
+    mocked_fs.files.get_media.assert_not_called()
+
+
+def test_native_file_unsupported_export_mime_raises(mocked_fs: MockedDriveFS) -> None:
+    with pytest.raises(ValueError, match="text/plain, application/pdf"):
+        _open_native(mocked_fs, export_mime_type="image/png")
+
+    mocked_fs.files.export_media.assert_not_called()
+
+
+def test_native_file_without_export_format_raises(mocked_fs: MockedDriveFS) -> None:
+    with pytest.raises(ValueError, match="no export formats"):
+        _open_native(mocked_fs, export_formats={})
+
+    mocked_fs.files.export_media.assert_not_called()
+
+
+def test_regular_file_read_does_not_export(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    media = mock.Mock()
+    media.headers = empty_headers()
+    media.execute.return_value = b"hello"
+    mocked_fs.files.get_media.return_value = media
+
+    file = _read_file(fs)
+
+    assert file.read() == b"hello"
+    mocked_fs.files.export_media.assert_not_called()
+
+
 def test_initiate_upload_new_file(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     mocked_fs.files._http.request.return_value = (
