@@ -537,6 +537,108 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise ValueError("Path is not a directory")
         self.rm(path, recursive=False, permanent=permanent)
 
+    def _resolve_optional(self, path: str) -> FileInfo | None:
+        """Return the info for ``path`` or ``None`` if it does not exist.
+
+        A :class:`MultipleFilesError` (ambiguous path) is deliberately propagated
+        rather than treated as "missing", so callers do not silently proceed on
+        a path that resolves to several Drive files.
+        """
+        try:
+            return self.info(path)
+        except MultipleFilesError:
+            raise
+        except FileNotFoundError:
+            return None
+
+    @override
+    def cp_file(self, path1: PathLike, path2: PathLike, **kwargs: Any) -> None:
+        """Copy a single file server-side via the Drive ``files.copy`` API.
+
+        - If ``path2`` is an existing directory, the file is copied *into* it,
+          keeping the source's basename.
+        - An existing file at the destination is **overwritten** (Drive cannot
+          replace content by path and permits duplicate names, so the existing
+          file is trashed before the copy).
+        - Directory sources are recreated with ``makedirs`` (``files.copy``
+          cannot copy folders), so recursive :meth:`copy` reproduces the tree.
+
+        Args:
+            path1: Source path.
+            path2: Destination path, or an existing destination directory to
+                copy into. Missing parent directories are created.
+            **kwargs: Ignored; accepted for fsspec compatibility.
+
+        Raises:
+            FileNotFoundError: If ``path1`` does not exist.
+            IsADirectoryError: If the resolved destination is an existing
+                directory (a file cannot overwrite a folder).
+            NotADirectoryError: If a directory source's destination is occupied
+                by an existing file.
+            ValueError: If the source and destination resolve to the same file.
+            MultipleFilesError: If ``path1`` or the destination resolves to
+                multiple files.
+        """
+        source = self.info(path1)
+        src_name = self._path_str(path1).rstrip("/").rsplit("/", 1)[-1]
+        destination = self._path_str(path2)
+        existing = self._resolve_optional(destination)
+
+        if source["type"] == "directory":
+            # files.copy cannot copy folders; recreate the directory so the
+            # recursive copy path can reproduce the (possibly empty) subtree.
+            if existing is not None and existing["type"] != "directory":
+                raise NotADirectoryError(destination)
+            self.makedirs(destination, exist_ok=True)
+            return
+
+        if existing is not None and existing["type"] == "directory":
+            destination = f"{destination.rstrip('/')}/{src_name}"
+            existing = self._resolve_optional(destination)
+
+        if existing is not None:
+            if existing["type"] == "directory":
+                raise IsADirectoryError(destination)
+            if existing["id"] == source["id"]:
+                raise ValueError(f"cannot copy {self._path_str(path1)!r} onto itself")
+
+        dest_parent = self._parent(destination)
+        self.makedirs(dest_parent, exist_ok=True)
+        dest_parent_id = self._path_to_id(dest_parent)
+        dest_name = destination.rstrip("/").rsplit("/", 1)[-1]
+
+        # Overwrite: trash the existing destination first so the copy does not
+        # create a second file with the same name (violating the unique-path
+        # invariant). Done before the copy so at most one live file ever holds
+        # the name; a failed copy leaves the old file recoverable from trash.
+        if existing is not None:
+            self._trash_file(existing["id"])
+            if dest_parent in self.dircache:
+                self.dircache[dest_parent] = [
+                    li for li in self.dircache[dest_parent] if li["name"] != destination
+                ]
+
+        LOGGER.debug(
+            "Copying %s (id=%s) to %s, child of %s",
+            self._path_str(path1),
+            source["id"],
+            destination,
+            dest_parent_id,
+        )
+        out: File = self.files.copy(
+            fileId=source["id"],
+            body={"name": dest_name, "parents": [dest_parent_id]},
+            # Request the full info mask so the cached entry carries size/mimeType;
+            # files.copy's default response omits size.
+            fields=INFO_FIELDS,
+            supportsAllDrives=True,
+        ).execute(num_retries=_NUM_RETRIES)
+
+        if dest_parent in self.dircache:
+            self.dircache[dest_parent].append(
+                _finfo_from_response(out, path_prefix=dest_parent)
+            )
+
     @override
     def invalidate_cache(self, path: PathLike | None = None) -> None:
         if path is None:
