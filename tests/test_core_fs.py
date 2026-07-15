@@ -1,7 +1,7 @@
 """Unit tests for GoogleDriveFileSystem directory and path operations."""
 
 import pathlib
-from typing import Any
+from typing import Any, Callable
 from unittest import mock
 
 import pytest
@@ -337,6 +337,20 @@ def test_rmdir_permanent_forwards_flag(mocked_fs: MockedDriveFS) -> None:
     mocked_fs.files.update.assert_not_called()
 
 
+def _cp_info_side_effect(
+    mapping: dict[str, FileInfo],
+) -> Callable[..., FileInfo]:
+    """Build an ``info`` mock that resolves known paths and 404s the rest."""
+
+    def _info(path: Any, *args: Any, **kwargs: Any) -> FileInfo:
+        key = str(path)
+        if key in mapping:
+            return mapping[key]
+        raise FileNotFoundError(key)
+
+    return _info
+
+
 def test_cp_file_copies_server_side_and_updates_dircache(
     mocked_fs: MockedDriveFS,
 ) -> None:
@@ -344,15 +358,18 @@ def test_cp_file_copies_server_side_and_updates_dircache(
     # new file in the destination parent's cached listing.
     fs = mocked_fs.fs
     fs.info = mock.Mock(
-        return_value={
-            "name": "src/a.txt",
-            "id": "src-id",
-            "size": 11,
-            "type": "file",
-            "mimeType": "text/plain",
-        }
+        side_effect=_cp_info_side_effect(
+            {
+                "src/a.txt": {
+                    "name": "src/a.txt",
+                    "id": "src-id",
+                    "size": 11,
+                    "type": "file",
+                    "mimeType": "text/plain",
+                }
+            }
+        )
     )
-    fs.exists = mock.Mock(return_value=False)
     fs.makedirs = mock.Mock()
     fs._path_to_id = mock.Mock(return_value="dst-parent-id")
     fs.dircache["dst"] = empty_listing()
@@ -375,6 +392,8 @@ def test_cp_file_copies_server_side_and_updates_dircache(
     mocked_fs.files.copy.return_value.execute.assert_called_once_with(
         num_retries=_NUM_RETRIES
     )
+    # A brand-new destination is not trashed first.
+    mocked_fs.files.update.assert_not_called()
     assert fs.dircache["dst"] == [
         {
             "id": "copy-id",
@@ -386,17 +405,174 @@ def test_cp_file_copies_server_side_and_updates_dircache(
     ]
 
 
-def test_cp_file_raises_when_destination_exists(mocked_fs: MockedDriveFS) -> None:
-    # Drive allows duplicate names in a folder, so guard the unique-path
-    # invariant instead of silently creating a second "b.txt".
+def test_cp_file_overwrites_existing_destination(mocked_fs: MockedDriveFS) -> None:
+    # An existing file at the destination is overwritten: it is trashed first
+    # (Drive cannot replace content by path) and replaced in the dircache.
     fs = mocked_fs.fs
     fs.info = mock.Mock(
-        return_value={"name": "src/a.txt", "id": "src-id", "size": 1, "type": "file"}
+        side_effect=_cp_info_side_effect(
+            {
+                "src/a.txt": {
+                    "name": "src/a.txt",
+                    "id": "src-id",
+                    "size": 11,
+                    "type": "file",
+                    "mimeType": "text/plain",
+                },
+                "dst/b.txt": {
+                    "name": "dst/b.txt",
+                    "id": "old-id",
+                    "size": 3,
+                    "type": "file",
+                },
+            }
+        )
     )
-    fs.exists = mock.Mock(return_value=True)
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(return_value="dst-parent-id")
+    fs.dircache["dst"] = [
+        {"name": "dst/b.txt", "id": "old-id", "size": 3, "type": "file"}
+    ]
+    mocked_fs.files.copy.return_value.execute.return_value = {
+        "id": "copy-id",
+        "name": "b.txt",
+        "mimeType": "text/plain",
+        "size": "11",
+    }
 
-    with pytest.raises(FileExistsError):
+    fs.cp_file("src/a.txt", "dst/b.txt")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="old-id", body={"trashed": True}, supportsAllDrives=True
+    )
+    mocked_fs.files.copy.assert_called_once_with(
+        fileId="src-id",
+        body={"name": "b.txt", "parents": ["dst-parent-id"]},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+    )
+    # The stale entry is dropped and the new copy recorded (exactly one entry).
+    assert fs.dircache["dst"] == [
+        {
+            "id": "copy-id",
+            "name": "dst/b.txt",
+            "mimeType": "text/plain",
+            "size": 11,
+            "type": "file",
+        }
+    ]
+
+
+def test_cp_file_copies_into_existing_directory(mocked_fs: MockedDriveFS) -> None:
+    # When the destination is an existing directory, the file is copied *into*
+    # it under the source's basename (POSIX cp semantics).
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "src/a.txt": {
+                    "name": "src/a.txt",
+                    "id": "src-id",
+                    "size": 5,
+                    "type": "file",
+                },
+                "dstdir": {
+                    "name": "dstdir",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+                # "dstdir/a.txt" does not exist yet.
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(return_value="dir-id")
+    mocked_fs.files.copy.return_value.execute.return_value = {
+        "id": "copy-id",
+        "name": "a.txt",
+        "size": "5",
+    }
+
+    fs.cp_file("src/a.txt", "dstdir")
+
+    mocked_fs.files.copy.assert_called_once_with(
+        fileId="src-id",
+        body={"name": "a.txt", "parents": ["dir-id"]},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+    )
+    fs._path_to_id.assert_called_once_with("dstdir")
+
+
+def test_cp_file_onto_itself_raises(mocked_fs: MockedDriveFS) -> None:
+    # Copying a file onto its own path resolves to the same id and is refused.
+    fs = mocked_fs.fs
+    same: FileInfo = {"name": "dir/a.txt", "id": "same-id", "size": 4, "type": "file"}
+    fs.info = mock.Mock(side_effect=_cp_info_side_effect({"dir/a.txt": same}))
+
+    with pytest.raises(ValueError, match="onto itself"):
+        fs.cp_file("dir/a.txt", "dir/a.txt")
+
+    mocked_fs.files.copy.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_cp_file_ambiguous_destination_propagates(mocked_fs: MockedDriveFS) -> None:
+    # An ambiguous destination (MultipleFilesError) is surfaced, not treated as
+    # "missing", so the copy does not proceed onto a duplicated name.
+    fs = mocked_fs.fs
+
+    def _info(path: Any, *args: Any, **kwargs: Any) -> FileInfo:
+        if str(path) == "src/a.txt":
+            return {"name": "src/a.txt", "id": "src-id", "size": 1, "type": "file"}
+        raise MultipleFilesError(str(path))
+
+    fs.info = mock.Mock(side_effect=_info)
+
+    with pytest.raises(MultipleFilesError):
         fs.cp_file("src/a.txt", "dst/b.txt")
+
+    mocked_fs.files.copy.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_cp_file_into_directory_containing_same_named_dir_raises(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # Copying a file into a directory that already holds a subdirectory of the
+    # source's name cannot overwrite that folder with a file.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "src/a.txt": {
+                    "name": "src/a.txt",
+                    "id": "src-id",
+                    "size": 1,
+                    "type": "file",
+                },
+                "dstdir": {
+                    "name": "dstdir",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+                "dstdir/a.txt": {
+                    "name": "dstdir/a.txt",
+                    "id": "subdir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+            }
+        )
+    )
+
+    with pytest.raises(IsADirectoryError):
+        fs.cp_file("src/a.txt", "dstdir")
 
     mocked_fs.files.copy.assert_not_called()
 
@@ -406,13 +582,17 @@ def test_cp_file_directory_source_recreates_directory(mocked_fs: MockedDriveFS) 
     # recursive copy path can reproduce the subtree.
     fs = mocked_fs.fs
     fs.info = mock.Mock(
-        return_value={
-            "name": "src/sub",
-            "id": "dir-id",
-            "size": 0,
-            "type": "directory",
-            "mimeType": DIR_MIME_TYPE,
-        }
+        side_effect=_cp_info_side_effect(
+            {
+                "src/sub": {
+                    "name": "src/sub",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                }
+            }
+        )
     )
     fs.makedirs = mock.Mock()
 
@@ -422,6 +602,79 @@ def test_cp_file_directory_source_recreates_directory(mocked_fs: MockedDriveFS) 
     mocked_fs.files.copy.assert_not_called()
 
 
+def test_cp_file_directory_source_over_existing_file_raises(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # A directory cannot be recreated where a file already occupies the path.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "src/sub": {
+                    "name": "src/sub",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+                "dst/sub": {
+                    "name": "dst/sub",
+                    "id": "file-id",
+                    "size": 2,
+                    "type": "file",
+                },
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+
+    with pytest.raises(NotADirectoryError):
+        fs.cp_file("src/sub", "dst/sub")
+
+    fs.makedirs.assert_not_called()
+
+
+def test_cp_file_native_google_file_caches_zero_size(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # A Google-native file (no size in the response) copies server-side and is
+    # cached with size 0, matching how Drive reports native files elsewhere.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "docs/report": {
+                    "name": "docs/report",
+                    "id": "doc-id",
+                    "size": 0,
+                    "type": "file",
+                    "mimeType": "application/vnd.google-apps.document",
+                }
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(return_value="dst-parent-id")
+    fs.dircache["dst"] = empty_listing()
+    mocked_fs.files.copy.return_value.execute.return_value = {
+        "id": "copy-id",
+        "name": "report copy",
+        "mimeType": "application/vnd.google-apps.document",
+        # No "size" for native files.
+    }
+
+    fs.cp_file("docs/report", "dst/report copy")
+
+    mocked_fs.files.copy.assert_called_once_with(
+        fileId="doc-id",
+        body={"name": "report copy", "parents": ["dst-parent-id"]},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+    )
+    assert fs.dircache["dst"][0]["size"] == 0
+    assert fs.dircache["dst"][0]["mimeType"] == ("application/vnd.google-apps.document")
+
+
 def test_cp_file_without_cached_parent_skips_dircache_update(
     mocked_fs: MockedDriveFS,
 ) -> None:
@@ -429,9 +682,17 @@ def test_cp_file_without_cached_parent_skips_dircache_update(
     # but there is nothing to update in the dircache.
     fs = mocked_fs.fs
     fs.info = mock.Mock(
-        return_value={"name": "src/a.txt", "id": "src-id", "size": 5, "type": "file"}
+        side_effect=_cp_info_side_effect(
+            {
+                "src/a.txt": {
+                    "name": "src/a.txt",
+                    "id": "src-id",
+                    "size": 5,
+                    "type": "file",
+                }
+            }
+        )
     )
-    fs.exists = mock.Mock(return_value=False)
     fs.makedirs = mock.Mock()
     fs._path_to_id = mock.Mock(return_value="dst-parent-id")
     mocked_fs.files.copy.return_value.execute.return_value = {

@@ -211,18 +211,109 @@ def test_copy_recursive_directory(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-def test_cp_file_existing_destination_raises(fs: GoogleDriveFileSystem) -> None:
-    # Copying onto an existing path is refused, protecting the unique-path
-    # invariant (Drive would otherwise create a duplicate name).
-    src = _test_path("cp_exist_src.txt")
-    dst = _test_path("cp_exist_dst.txt")
+def test_cp_file_overwrites_existing_destination(fs: GoogleDriveFileSystem) -> None:
+    # Copying onto an existing file overwrites it (the old file is trashed), and
+    # the destination path stays unique (no duplicate name is created).
+    src = _test_path("cp_over_src.txt")
+    dst = _test_path("cp_over_dst.txt")
     with fs.open(src, "wb") as f:
-        f.write(b"src")
+        f.write(b"new content")
     with fs.open(dst, "wb") as f:
-        f.write(b"dst")
+        f.write(b"old content")
+    old_id = fs.info(dst)["id"]
 
-    with pytest.raises(FileExistsError):
-        fs.cp_file(src, dst)
+    fs.cp_file(src, dst)
+
+    assert fs.cat(dst) == b"new content"
+    # Overwrite replaced the file (new id) and did not leave a duplicate.
+    assert fs.info(dst)["id"] != old_id
+    entries = fs.ls(TESTDIR, detail=True)
+    assert len([e for e in entries if e["name"] == dst]) == 1
+
+
+@pytest.mark.integration
+def test_cp_file_into_existing_directory(fs: GoogleDriveFileSystem) -> None:
+    # A destination that is an existing directory means "copy into it" under the
+    # source's basename, matching POSIX cp semantics.
+    src = _test_path("cp_into_src.txt")
+    dst_dir = _test_path("cp_into_dir")
+    fs.makedirs(dst_dir)
+    with fs.open(src, "wb") as f:
+        f.write(b"into dir")
+
+    fs.cp_file(src, dst_dir)
+
+    assert fs.cat(f"{dst_dir}/cp_into_src.txt") == b"into dir"
+
+
+@pytest.mark.integration
+def test_copy_single_file_into_directory_via_public_api(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # Through the public copy(): a single top-level file copied to an existing
+    # directory lands inside it (fsspec's other_paths collapses the target to
+    # the dir itself, which cp_file resolves as "copy into").
+    src = _test_path("pubcp_src.txt")
+    dst_dir = _test_path("pubcp_dir")
+    fs.makedirs(dst_dir)
+    with fs.open(src, "wb") as f:
+        f.write(b"public copy into dir")
+
+    fs.copy(src, dst_dir)
+
+    assert fs.cat(f"{dst_dir}/pubcp_src.txt") == b"public copy into dir"
+
+
+@pytest.mark.integration
+def test_copy_recursive_overwrites_colliding_files(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # A recursive copy whose destinations already exist must overwrite in place
+    # and succeed, not abort partway on a name clash. dst_dir is created up front
+    # so fsspec nests the tree under dst_dir/<src basename> on *both* runs, making
+    # the second run collide with the first at identical target paths.
+    src_dir = _test_path("recov_src")
+    dst_dir = _test_path("recov_dst")
+    nested_dst = f"{dst_dir}/recov_src"
+    fs.makedirs(f"{src_dir}/nested")
+    fs.makedirs(dst_dir)
+    with fs.open(f"{src_dir}/a.txt", "wb") as f:
+        f.write(b"v1")
+    with fs.open(f"{src_dir}/nested/b.txt", "wb") as f:
+        f.write(b"b")
+
+    fs.copy(src_dir, dst_dir, recursive=True)
+    assert fs.cat(f"{nested_dst}/a.txt") == b"v1"
+
+    # Update a source file and copy again onto the now-populated destination.
+    with fs.open(f"{src_dir}/a.txt", "wb") as f:
+        f.write(b"v2-updated")
+    fs.copy(src_dir, dst_dir, recursive=True)
+
+    assert fs.cat(f"{nested_dst}/a.txt") == b"v2-updated"
+    assert fs.cat(f"{nested_dst}/nested/b.txt") == b"b"
+    # The overwrite did not leave a duplicate at the colliding path.
+    entries = fs.ls(nested_dst, detail=True)
+    assert len([e for e in entries if e["name"] == f"{nested_dst}/a.txt"]) == 1
+
+
+@pytest.mark.integration
+def test_mv_over_existing_destination(fs: GoogleDriveFileSystem) -> None:
+    # mv (copy-then-trash) onto an existing destination overwrites it instead of
+    # failing on a name clash, and the source is gone afterwards.
+    src = _test_path("mv_over_src.txt")
+    dst = _test_path("mv_over_dst.txt")
+    with fs.open(src, "wb") as f:
+        f.write(b"replacement")
+    with fs.open(dst, "wb") as f:
+        f.write(b"to be replaced")
+
+    fs.mv(src, dst)
+
+    assert fs.cat(dst) == b"replacement"
+    assert not fs.exists(src)
+    entries = fs.ls(TESTDIR, detail=True)
+    assert len([e for e in entries if e["name"] == dst]) == 1
 
 
 @pytest.mark.integration
