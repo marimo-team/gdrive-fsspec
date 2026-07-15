@@ -116,4 +116,4 @@ jobs:
           GDRIVE_FSSPEC_DRIVE_FULL_ACCESS: drive-full-access
           GDRIVE_FSSPEC_DRIVE_CONTENT_MANAGER: drive-test
           GDRIVE_FSSPEC_DRIVE_READONLY: drive-readonly
-        run: uv run pytest -v -m integration
+        run: uv run pytest -v -m integration -n auto --dist loadgroup

@@ -64,10 +64,27 @@ Use reStructuredText (RST) double backticks for inline code in docstrings—for 
 
 ## Integration tests
 
-Integration tests use a real Google Drive account and a directory named `gdrive_fsspec_testdir` on Drive.
+Integration tests use a real Google Drive account. Each pytest-xdist worker uses its own directory on Drive (`gdrive_fsspec_testdir`, or `gdrive_fsspec_testdir_gw0`, …).
+
+Serial (default):
 
 ```sh
 uv run pytest -v -m integration
+```
+
+Parallel (requires `pytest-xdist`):
+
+```sh
+uv run pytest -v -m integration -n auto --dist loadgroup
+```
+
+On a 2-core CI runner, parallel runs take roughly half the time of serial (~4–5 min
+vs ~8–9 min). Locally, `-n auto` may use many cores and finish in about a minute.
+
+If changes-sync tests flake under parallel load, pin them to one worker:
+
+```sh
+GDRIVE_FSSPEC_SERIAL_SYNC=1 uv run pytest -v -m integration -n auto --dist loadgroup
 ```
 
 By default, the tests trigger a browser login to authenticate. However, you can also use service-account credentials.
