@@ -24,6 +24,7 @@ from ._constants import (
 )
 from .types import FileInfo
 from .typing_utils import override
+from .utils import redact_uri
 
 if TYPE_CHECKING:
     from .core import GoogleDriveFileSystem
@@ -253,7 +254,7 @@ class GoogleDriveFile(AbstractBufferedFile):
                 LOGGER.warning(
                     "Retrying resumable upload %s %s (attempt %d/%d) after %.2fs",
                     method,
-                    uri,
+                    redact_uri(uri),
                     attempt,
                     _NUM_RETRIES,
                     sleep_time,

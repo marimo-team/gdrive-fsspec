@@ -1,3 +1,6 @@
+from urllib.parse import urlsplit, urlunsplit
+
+
 def escape_query_str(value: str) -> str:
     """Escape a string literal for a Drive ``files.list`` query.
 
@@ -30,3 +33,9 @@ def merge_fields(base: str, extra: str | None) -> str:
     fields = [f.strip() for f in base.split(",") if f.strip()]
     fields.extend(f.strip() for f in extra.split(",") if f.strip())
     return ",".join(dict.fromkeys(fields))
+
+
+def redact_uri(uri: str) -> str:
+    """Return ``uri`` without query or fragment (session tokens live there)."""
+    parts = urlsplit(uri)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
