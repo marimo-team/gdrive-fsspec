@@ -538,6 +538,60 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.rm(path, recursive=False, permanent=permanent)
 
     @override
+    def cp_file(self, path1: PathLike, path2: PathLike, **kwargs: Any) -> None:
+        """Copy a single file server-side via the Drive ``files.copy`` API.
+
+        Args:
+            path1: Source path.
+            path2: Destination path. Its parent directories are created if
+                missing.
+            **kwargs: Ignored; accepted for fsspec compatibility.
+
+        Raises:
+            FileNotFoundError: If ``path1`` does not exist.
+            FileExistsError: If a file or folder already exists at ``path2``
+                (Drive would otherwise create an identically named duplicate).
+            MultipleFilesError: If ``path1`` resolves to multiple files.
+        """
+        source = self.info(path1)
+        destination = self._path_str(path2)
+
+        if source["type"] == "directory":
+            # files.copy cannot copy folders; recreate the directory so the
+            # recursive copy path can reproduce the (possibly empty) subtree.
+            self.makedirs(destination, exist_ok=True)
+            return
+
+        if self.exists(destination):
+            raise FileExistsError(destination)
+
+        dest_parent = self._parent(destination)
+        self.makedirs(dest_parent, exist_ok=True)
+        dst_parent_id = self._path_to_id(dest_parent)
+        dst_name = destination.rstrip("/").rsplit("/", 1)[-1]
+
+        LOGGER.debug(
+            "Copying %s (id=%s) to %s, child of %s",
+            self._path_str(path1),
+            source["id"],
+            destination,
+            dst_parent_id,
+        )
+        out: File = self.files.copy(
+            fileId=source["id"],
+            body={"name": dst_name, "parents": [dst_parent_id]},
+            # Request the full info mask so the cached entry carries size/mimeType;
+            # files.copy's default response omits size.
+            fields=INFO_FIELDS,
+            supportsAllDrives=True,
+        ).execute(num_retries=_NUM_RETRIES)
+
+        if dest_parent in self.dircache:
+            self.dircache[dest_parent].append(
+                _finfo_from_response(out, path_prefix=dest_parent)
+            )
+
+    @override
     def invalidate_cache(self, path: PathLike | None = None) -> None:
         if path is None:
             self.dircache.clear()

@@ -157,6 +157,135 @@ def test_rm_missing_file_raises_file_not_found(
         fs.rm(_test_path("never_existed"))
 
 
+@pytest.mark.integration
+def test_cp_file_server_side_copy(fs: GoogleDriveFileSystem) -> None:
+    # cp_file duplicates the content server-side into a new, independently
+    # addressable file with its own id.
+    src = _test_path("cp_src.txt")
+    dst = _test_path("cp_dst.txt")
+    data = b"server-side copy"
+    with fs.open(src, "wb") as f:
+        f.write(data)
+
+    fs.cp_file(src, dst)
+
+    assert fs.cat(dst) == data
+    assert fs.cat(src) == data
+    assert fs.info(src)["id"] != fs.info(dst)["id"]
+
+
+@pytest.mark.integration
+def test_cp_file_updates_live_dircache(fs: GoogleDriveFileSystem) -> None:
+    # After a cached listing exists, cp_file records the new file so a cached
+    # ls sees it without re-listing.
+    src = _test_path("cp_cache_src.txt")
+    dst = _test_path("cp_cache_dst.txt")
+    with fs.open(src, "wb") as f:
+        f.write(b"cache me")
+    fs.ls(TESTDIR, detail=True)  # populate the parent's dircache
+
+    fs.cp_file(src, dst)
+
+    entries = fs.ls(TESTDIR, detail=True)  # served from cache
+    match = [e for e in entries if e["name"] == dst]
+    assert len(match) == 1
+    assert match[0]["size"] == len(b"cache me")
+
+
+@pytest.mark.integration
+def test_copy_recursive_directory(fs: GoogleDriveFileSystem) -> None:
+    # fsspec's recursive copy walks the tree and calls cp_file per entry;
+    # directories are recreated and files copied server-side.
+    src_dir = _test_path("cp_tree_src")
+    dst_dir = _test_path("cp_tree_dst")
+    fs.makedirs(f"{src_dir}/nested")  # writes require the parent dir to exist
+    with fs.open(f"{src_dir}/a.txt", "wb") as f:
+        f.write(b"a")
+    with fs.open(f"{src_dir}/nested/b.txt", "wb") as f:
+        f.write(b"b")
+
+    fs.copy(src_dir, dst_dir, recursive=True)
+
+    assert fs.cat(f"{dst_dir}/a.txt") == b"a"
+    assert fs.cat(f"{dst_dir}/nested/b.txt") == b"b"
+
+
+@pytest.mark.integration
+def test_cp_file_existing_destination_raises(fs: GoogleDriveFileSystem) -> None:
+    # Copying onto an existing path is refused, protecting the unique-path
+    # invariant (Drive would otherwise create a duplicate name).
+    src = _test_path("cp_exist_src.txt")
+    dst = _test_path("cp_exist_dst.txt")
+    with fs.open(src, "wb") as f:
+        f.write(b"src")
+    with fs.open(dst, "wb") as f:
+        f.write(b"dst")
+
+    with pytest.raises(FileExistsError):
+        fs.cp_file(src, dst)
+
+
+@pytest.mark.integration
+def test_cp_file_creates_missing_destination_parent(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # cp_file auto-creates the destination's parent directories, so a copy into
+    # a not-yet-existing nested folder succeeds and the folders are materialized.
+    src = _test_path("cp_parent_src.txt")
+    dst = _test_path("cp_new_parent/deeper/cp_parent_dst.txt")
+    data = b"needs new parents"
+    with fs.open(src, "wb") as f:
+        f.write(data)
+    assert not fs.exists(_test_path("cp_new_parent"))
+
+    fs.cp_file(src, dst)
+
+    assert fs.isdir(_test_path("cp_new_parent"))
+    assert fs.isdir(_test_path("cp_new_parent/deeper"))
+    assert fs.cat(dst) == data
+
+
+@pytest.mark.integration
+def test_cp_file_preserves_larger_content(fs: GoogleDriveFileSystem) -> None:
+    # A server-side copy must reproduce the source bytes exactly, not just short
+    # inline payloads. Uses a multi-hundred-KB deterministic payload.
+    src = _test_path("cp_large_src.bin")
+    dst = _test_path("cp_large_dst.bin")
+    # Deterministic, varied payload so a truncated/garbled copy would be caught.
+    payload = bytes((i * 2654435761) & 0xFF for i in range(1_500_000))
+    with fs.open(src, "wb") as f:
+        f.write(payload)
+
+    fs.cp_file(src, dst)
+
+    copied = fs.cat(dst)
+    assert len(copied) == len(payload)
+    assert copied == payload
+    assert fs.info(src)["id"] != fs.info(dst)["id"]
+
+
+@pytest.mark.integration
+def test_mv_via_copy_then_trash(fs: GoogleDriveFileSystem) -> None:
+    # With cp_file implemented, the inherited mv is copy-then-rm. rm defaults to
+    # trash, so the destination holds the content and the source leaves the
+    # default listing but remains recoverable from trash.
+    src = _test_path("mv_src.txt")
+    dst = _test_path("mv_dst.txt")
+    data = b"move me via copy"
+    with fs.open(src, "wb") as f:
+        f.write(data)
+    original_id = fs.info(src)["id"]
+
+    fs.mv(src, dst)
+
+    assert fs.cat(dst) == data
+    assert not fs.exists(src)
+    # copy-then-delete produces a new file id at the destination.
+    assert fs.info(dst)["id"] != original_id
+    # Source was trashed (default), not permanently deleted.
+    assert fs.info(src, trashed=True)["trashed"] is True
+
+
 # ---------------------------------------------------------------------------
 # Content-manager profile (drive-test): may trash but not permanently delete.
 # ---------------------------------------------------------------------------
