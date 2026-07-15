@@ -34,6 +34,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.2.0",
     "google-api-python-client-stubs>=1.37.0",
     "pyrefly>=1.1.1",
     "pytest>=9.0.3",

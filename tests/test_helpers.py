@@ -9,7 +9,7 @@ from gdrive_fsspec._constants import (
     _finfo_from_response,
     _normalize_path,
 )
-from gdrive_fsspec.utils import escape_query_str, merge_fields
+from gdrive_fsspec.utils import escape_query_str, merge_fields, redact_uri
 
 
 @pytest.mark.parametrize(
@@ -52,6 +52,27 @@ def test_merge_fields(base: str, extra: str | None, expected: str) -> None:
 )
 def test_escape_query_str(value: str, expected: str) -> None:
     assert escape_query_str(value) == expected
+
+
+@pytest.mark.parametrize(
+    "uri, expected",
+    [
+        # Query strings (upload session tokens) are stripped.
+        (
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=secret",
+            "https://www.googleapis.com/upload/drive/v3/files",
+        ),
+        # Fragments are stripped too.
+        (
+            "https://example.com/path/to/file#fragment",
+            "https://example.com/path/to/file",
+        ),
+        # Paths without sensitive parts pass through.
+        ("https://example.com/path/to/file", "https://example.com/path/to/file"),
+    ],
+)
+def test_redact_uri(uri: str, expected: str) -> None:
+    assert redact_uri(uri) == expected
 
 
 @pytest.mark.parametrize(

@@ -122,7 +122,7 @@ Service accounts cannot own files in Google Drive and have no storage quota. Upl
 
 1. Enable Google Drive API for the project in the Google Cloud Console.
 2. Create a new service account.
-3. Grant the service account permissions (likely Editor role, as there is no fine-grained Drive permissions).
+3. Do **not** grant broad project IAM roles (for example Editor). The service account only needs a key for Drive API access; permissions come from shared-drive membership below.
 4. Create a new key and download the JSON file.
 
 5. To add a shared drive to the service account, get the service account email.
