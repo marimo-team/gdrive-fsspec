@@ -564,11 +564,11 @@ def _await_change_for(
     that occurred before the token but only becomes visible on a later poll.
     """
     for delay in _SYNC_POLL_DELAYS_S:
+        if delay:
+            time.sleep(delay)
         change = _find_change_since(fs, start_token, file_id)
         if change is not None:
             return change
-        if delay:
-            time.sleep(delay)
     raise AssertionError(f"no change for {file_id} appeared in the feed")
 
 
