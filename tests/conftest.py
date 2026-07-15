@@ -283,10 +283,9 @@ def _remove_testdir(instance: GoogleDriveFileSystem) -> None:
 
 
 def _ensure_testdir(instance: GoogleDriveFileSystem) -> None:
-    """Ensure ``TESTDIR`` exists without wiping prior test artifacts."""
-    instance.invalidate_cache()
-    if not instance.exists(TESTDIR):
-        instance.mkdir(TESTDIR, create_parents=True)
+    """Give ``instance`` a fresh, empty ``TESTDIR`` once per session."""
+    _remove_testdir(instance)
+    instance.mkdir(TESTDIR, create_parents=True)
 
 
 ProfiledFactory = Callable[[str], FsFactory]
