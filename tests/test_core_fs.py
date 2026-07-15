@@ -707,6 +707,447 @@ def test_cp_file_without_cached_parent_skips_dircache_update(
     mocked_fs.files.copy.assert_called_once()
 
 
+def test_mv_renames_in_same_parent(mocked_fs: MockedDriveFS) -> None:
+    # A same-parent rename is one files.update touching only the name (no
+    # addParents/removeParents); the file id is preserved and the parent listing
+    # swaps the old name for the new.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "dir/old.txt": {
+                    "name": "dir/old.txt",
+                    "id": "file-id",
+                    "size": 4,
+                    "type": "file",
+                }
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(return_value="dir-id")
+    fs.dircache["dir"] = [
+        {"name": "dir/old.txt", "id": "file-id", "size": 4, "type": "file"}
+    ]
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "new.txt",
+        "size": "4",
+        "mimeType": "text/plain",
+    }
+
+    fs.mv("dir/old.txt", "dir/new.txt")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="file-id",
+        body={"name": "new.txt"},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+    )
+    # A same-parent rename skips parent creation and id resolution entirely.
+    fs.makedirs.assert_not_called()
+    fs._path_to_id.assert_not_called()
+    assert fs.dircache["dir"] == [
+        {
+            "id": "file-id",
+            "name": "dir/new.txt",
+            "size": 4,
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
+
+
+def test_mv_reparents_across_directories(mocked_fs: MockedDriveFS) -> None:
+    # A cross-directory move sends addParents/removeParents for the specific
+    # parents involved and repairs both cached listings, keeping the file id.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/f.txt": {
+                    "name": "a/f.txt",
+                    "id": "file-id",
+                    "size": 2,
+                    "type": "file",
+                }
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    fs.dircache["a"] = [{"name": "a/f.txt", "id": "file-id", "size": 2, "type": "file"}]
+    fs.dircache["b"] = empty_listing()
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "f.txt",
+        "size": "2",
+        "mimeType": "text/plain",
+    }
+
+    fs.mv("a/f.txt", "b/f.txt")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="file-id",
+        body={"name": "f.txt"},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+        addParents="b-id",
+        removeParents="a-id",
+    )
+    assert fs.dircache["a"] == []
+    assert fs.dircache["b"] == [
+        {
+            "id": "file-id",
+            "name": "b/f.txt",
+            "size": 2,
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
+
+
+def test_mv_overwrites_existing_destination(mocked_fs: MockedDriveFS) -> None:
+    # An existing file at the destination is trashed first (files.update
+    # trashed=True), then the source is moved in; the listing keeps one entry.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/f.txt": {
+                    "name": "a/f.txt",
+                    "id": "src-id",
+                    "size": 2,
+                    "type": "file",
+                },
+                "b/f.txt": {
+                    "name": "b/f.txt",
+                    "id": "old-id",
+                    "size": 9,
+                    "type": "file",
+                },
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    fs.dircache["a"] = [{"name": "a/f.txt", "id": "src-id", "size": 2, "type": "file"}]
+    fs.dircache["b"] = [{"name": "b/f.txt", "id": "old-id", "size": 9, "type": "file"}]
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "src-id",
+        "name": "f.txt",
+        "size": "2",
+        "mimeType": "text/plain",
+    }
+
+    fs.mv("a/f.txt", "b/f.txt")
+
+    assert mocked_fs.files.update.call_count == 2
+    mocked_fs.files.update.assert_any_call(
+        fileId="old-id", body={"trashed": True}, supportsAllDrives=True
+    )
+    mocked_fs.files.update.assert_any_call(
+        fileId="src-id",
+        body={"name": "f.txt"},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+        addParents="b-id",
+        removeParents="a-id",
+    )
+    assert fs.dircache["a"] == []
+    assert fs.dircache["b"] == [
+        {
+            "id": "src-id",
+            "name": "b/f.txt",
+            "size": 2,
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
+
+
+def test_mv_into_existing_directory(mocked_fs: MockedDriveFS) -> None:
+    # When the destination is an existing directory, the item is moved *into* it
+    # under the source's basename (POSIX mv semantics).
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/f.txt": {
+                    "name": "a/f.txt",
+                    "id": "file-id",
+                    "size": 2,
+                    "type": "file",
+                },
+                "dstdir": {
+                    "name": "dstdir",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(
+        side_effect=lambda p: {"dstdir": "dir-id", "a": "a-id"}[str(p)]
+    )
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "f.txt",
+        "size": "2",
+    }
+
+    fs.mv("a/f.txt", "dstdir")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="file-id",
+        body={"name": "f.txt"},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+        addParents="dir-id",
+        removeParents="a-id",
+    )
+
+
+def test_mv_identical_path_is_noop(mocked_fs: MockedDriveFS) -> None:
+    # Source and destination equal -> nothing happens (no info, no update).
+    fs = mocked_fs.fs
+    fs.info = mock.Mock()
+
+    fs.mv("dir/a.txt", "dir/a.txt")
+
+    fs.info.assert_not_called()
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_mv_into_own_parent_directory_is_noop(mocked_fs: MockedDriveFS) -> None:
+    # Moving a file "into" the directory it already lives in resolves back to the
+    # same resource, so it is refused as a no-op rather than issuing an update.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "dir/a.txt": {
+                    "name": "dir/a.txt",
+                    "id": "same-id",
+                    "size": 4,
+                    "type": "file",
+                },
+                "dir": {
+                    "name": "dir",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+            }
+        )
+    )
+
+    fs.mv("dir/a.txt", "dir")
+
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_mv_into_directory_containing_same_named_dir_raises(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # Moving a file into a directory that already holds a subdirectory of the
+    # source's name cannot overwrite that folder with a file.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/f.txt": {
+                    "name": "a/f.txt",
+                    "id": "src-id",
+                    "size": 2,
+                    "type": "file",
+                },
+                "dstdir": {
+                    "name": "dstdir",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+                "dstdir/f.txt": {
+                    "name": "dstdir/f.txt",
+                    "id": "subdir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+            }
+        )
+    )
+
+    with pytest.raises(IsADirectoryError):
+        fs.mv("a/f.txt", "dstdir")
+
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_mv_directory_over_existing_file_raises(mocked_fs: MockedDriveFS) -> None:
+    # A directory cannot overwrite an existing file, mirroring cp_file's guard.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/sub": {
+                    "name": "a/sub",
+                    "id": "dir-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                },
+                "b/sub": {
+                    "name": "b/sub",
+                    "id": "file-id",
+                    "size": 3,
+                    "type": "file",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(NotADirectoryError):
+        fs.mv("a/sub", "b/sub")
+
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_mv_directory_moves_and_drops_subtree(mocked_fs: MockedDriveFS) -> None:
+    # A directory move is one metadata update; its own cached listing and every
+    # descendant key are keyed by a stale path and must be dropped, while the
+    # destination parent records the moved directory.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "src/movable": {
+                    "name": "src/movable",
+                    "id": "mov-id",
+                    "size": 0,
+                    "type": "directory",
+                    "mimeType": DIR_MIME_TYPE,
+                }
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(
+        side_effect=lambda p: {"dst": "dst-id", "src": "src-id"}[str(p)]
+    )
+    fs.dircache["src"] = [
+        {
+            "name": "src/movable",
+            "id": "mov-id",
+            "size": 0,
+            "type": "directory",
+            "mimeType": DIR_MIME_TYPE,
+        }
+    ]
+    fs.dircache["src/movable"] = [
+        {"name": "src/movable/leaf.txt", "id": "leaf-id", "size": 3, "type": "file"}
+    ]
+    fs.dircache["src/movable/nested"] = empty_listing()
+    fs.dircache["dst"] = empty_listing()
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "mov-id",
+        "name": "movable",
+        "size": "0",
+        "mimeType": DIR_MIME_TYPE,
+    }
+
+    fs.mv("src/movable", "dst/movable")
+
+    mocked_fs.files.update.assert_called_once_with(
+        fileId="mov-id",
+        body={"name": "movable"},
+        fields=INFO_FIELDS,
+        supportsAllDrives=True,
+        addParents="dst-id",
+        removeParents="src-id",
+    )
+    assert fs.dircache["src"] == []
+    assert "src/movable" not in fs.dircache
+    assert "src/movable/nested" not in fs.dircache
+    assert fs.dircache["dst"] == [
+        {
+            "id": "mov-id",
+            "name": "dst/movable",
+            "size": 0,
+            "type": "directory",
+            "mimeType": DIR_MIME_TYPE,
+        }
+    ]
+
+
+def test_mv_without_cached_parent_skips_dircache_update(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # With no cached listing for either parent, the move still happens but there
+    # is nothing to repair in the dircache.
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        side_effect=_cp_info_side_effect(
+            {
+                "a/f.txt": {
+                    "name": "a/f.txt",
+                    "id": "file-id",
+                    "size": 2,
+                    "type": "file",
+                }
+            }
+        )
+    )
+    fs.makedirs = mock.Mock()
+    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    mocked_fs.files.update.return_value.execute.return_value = {
+        "id": "file-id",
+        "name": "f.txt",
+        "size": "2",
+    }
+
+    fs.mv("a/f.txt", "b/f.txt")
+
+    assert "a" not in fs.dircache
+    assert "b" not in fs.dircache
+    mocked_fs.files.update.assert_called_once()
+
+
+def test_mv_glob_delegates_to_base_copy_then_delete(mocked_fs: MockedDriveFS) -> None:
+    # Globs need fsspec's path expansion, so mv delegates them to the base
+    # copy-then-delete instead of a native metadata update.
+    fs = mocked_fs.fs
+    fs.copy = mock.Mock()
+    fs.rm = mock.Mock()
+
+    fs.mv("a/*.txt", "b")
+
+    fs.copy.assert_called_once()
+    fs.rm.assert_called_once()
+    mocked_fs.files.update.assert_not_called()
+
+
+def test_mv_list_paths_delegate_to_base_copy_then_delete(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    # A list of sources/destinations is likewise handled by the base mv.
+    fs = mocked_fs.fs
+    fs.copy = mock.Mock()
+    fs.rm = mock.Mock()
+
+    fs.mv(["a.txt"], ["b.txt"])
+
+    fs.copy.assert_called_once()
+    fs.rm.assert_called_once()
+    mocked_fs.files.update.assert_not_called()
+
+
 def test_ls_from_dircache_returns_sorted_names(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:

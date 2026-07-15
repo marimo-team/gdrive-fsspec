@@ -6,6 +6,7 @@ import os
 import time
 import warnings
 from functools import cached_property
+from glob import has_magic
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -383,6 +384,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise TypeError("expected a single path, not a sequence of paths")
         return stripped
 
+    @staticmethod
+    def _basename(path: str) -> str:
+        """Final path component of a stripped path (the ``_parent`` complement)."""
+        return path.rstrip("/").rsplit("/", 1)[-1]
+
     # Return type is Any (not drive.v3 File) to match fsspec AbstractFileSystem.mkdir.
     @override
     def mkdir(self, path: PathLike, create_parents: bool = True, **kwargs: Any) -> Any:
@@ -410,7 +416,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         parent_id = self._path_to_id(parent)
         meta = {
-            "name": stripped_path.rstrip("/").rsplit("/", 1)[-1],
+            "name": self._basename(stripped_path),
             "mimeType": DIR_MIME_TYPE,
             "parents": [parent_id],
         }
@@ -551,6 +557,30 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         except FileNotFoundError:
             return None
 
+    def _resolve_into_directory(
+        self, destination: str, src_name: str
+    ) -> tuple[str, FileInfo | None]:
+        """Resolve ``destination``, redirecting *into* it if it is a directory.
+
+        Returns the (possibly redirected) destination path and the file info occupying it, or ``None`` if the path is free.
+        """
+        existing = self._resolve_optional(destination)
+        if existing is not None and existing["type"] == "directory":
+            destination = f"{destination.rstrip('/')}/{src_name}"
+            existing = self._resolve_optional(destination)
+        return destination, existing
+
+    def _trash_existing_destination(self, existing: FileInfo, destination: str) -> None:
+        """Trash the file occupying ``destination`` and drop it from the cache.
+        Drive permits duplicate names, so this is useful to keep exactly one live file at the path.
+        """
+        self._trash_file(existing["id"])
+        dest_parent = self._parent(destination)
+        if dest_parent in self.dircache:
+            self.dircache[dest_parent] = [
+                li for li in self.dircache[dest_parent] if li["name"] != destination
+            ]
+
     @override
     def cp_file(self, path1: PathLike, path2: PathLike, **kwargs: Any) -> None:
         """Copy a single file server-side via the Drive ``files.copy`` API.
@@ -580,22 +610,19 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 multiple files.
         """
         source = self.info(path1)
-        src_name = self._path_str(path1).rstrip("/").rsplit("/", 1)[-1]
         destination = self._path_str(path2)
-        existing = self._resolve_optional(destination)
 
         if source["type"] == "directory":
             # files.copy cannot copy folders; recreate the directory so the
             # recursive copy path can reproduce the (possibly empty) subtree.
+            existing = self._resolve_optional(destination)
             if existing is not None and existing["type"] != "directory":
                 raise NotADirectoryError(destination)
             self.makedirs(destination, exist_ok=True)
             return
 
-        if existing is not None and existing["type"] == "directory":
-            destination = f"{destination.rstrip('/')}/{src_name}"
-            existing = self._resolve_optional(destination)
-
+        src_name = self._basename(self._path_str(path1))
+        destination, existing = self._resolve_into_directory(destination, src_name)
         if existing is not None:
             if existing["type"] == "directory":
                 raise IsADirectoryError(destination)
@@ -605,18 +632,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         dest_parent = self._parent(destination)
         self.makedirs(dest_parent, exist_ok=True)
         dest_parent_id = self._path_to_id(dest_parent)
-        dest_name = destination.rstrip("/").rsplit("/", 1)[-1]
+        dest_name = self._basename(destination)
 
-        # Overwrite: trash the existing destination first so the copy does not
-        # create a second file with the same name (violating the unique-path
-        # invariant). Done before the copy so at most one live file ever holds
-        # the name; a failed copy leaves the old file recoverable from trash.
         if existing is not None:
-            self._trash_file(existing["id"])
-            if dest_parent in self.dircache:
-                self.dircache[dest_parent] = [
-                    li for li in self.dircache[dest_parent] if li["name"] != destination
-                ]
+            self._trash_existing_destination(existing, destination)
 
         LOGGER.debug(
             "Copying %s (id=%s) to %s, child of %s",
@@ -635,6 +654,126 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         ).execute(num_retries=_NUM_RETRIES)
 
         if dest_parent in self.dircache:
+            self.dircache[dest_parent].append(
+                _finfo_from_response(out, path_prefix=dest_parent)
+            )
+
+    @override
+    def mv(
+        self,
+        path1: PathLike | list[PathLike],
+        path2: PathLike | list[PathLike],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Move or rename a file or directory via a Drive metadata update.
+
+        - If ``path2`` is an existing directory, the item is moved *into* it,
+          keeping the source's basename.
+        - An existing file at the destination is **overwritten**: it is trashed
+          first (Drive permits duplicate names, so this preserves the unique-path
+          invariant), then the source is moved into place.
+
+        Args:
+            path1: Source path.
+            path2: Destination path, or an existing directory to move into.
+                Missing parent directories are created.
+            recursive: Ignored for native moves; accepted for compatibility.
+            maxdepth: If set, forces the fsspec base ``mv`` fallback.
+            **kwargs: Ignored; accepted for fsspec compatibility.
+
+        Raises:
+            FileNotFoundError: If ``path1`` does not exist.
+            IsADirectoryError: If the resolved destination is an existing
+                directory (nothing can overwrite a folder by name).
+            NotADirectoryError: If a directory source's destination is occupied
+                by an existing file.
+            MultipleFilesError: If ``path1`` or the destination resolves to
+                multiple files.
+        """
+        if (
+            isinstance(path1, list)
+            or isinstance(path2, list)
+            or maxdepth is not None
+            or has_magic(str(path1))
+        ):
+            super().mv(path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
+            return
+
+        src = self._path_str(path1)
+        dst = self._path_str(path2)
+        if src == dst:
+            LOGGER.debug("mv: source and destination are identical (%s); no-op", src)
+            return
+        self._mv_file(src, dst)
+
+    def _mv_file(self, path1: str, path2: str) -> None:
+        """Move/rename a single resolved path in place via ``files.update``.
+
+        Mirrors :meth:`cp_file`'s destination handling (move-into-directory,
+        overwrite-by-trash, self-move guard) but relocates the existing resource
+        instead of copying it, then repairs the affected cached listings.
+        """
+        source = self.info(path1)
+        src_parent = self._parent(path1)
+        src_name = self._basename(path1)
+
+        destination, existing = self._resolve_into_directory(path2, src_name)
+        if existing is not None:
+            if existing["id"] == source["id"]:
+                return
+            if existing["type"] == "directory":
+                # A file/dir cannot overwrite an existing directory by name.
+                raise IsADirectoryError(destination)
+            if source["type"] == "directory":
+                # A directory cannot overwrite an existing file.
+                raise NotADirectoryError(destination)
+
+        dest_parent = self._parent(destination)
+        dest_name = self._basename(destination)
+
+        if existing is not None:
+            self._trash_existing_destination(existing, destination)
+
+        # removeParents/addParents are needed only when the parent actually
+        # changes; targeting the specific parent we are leaving, not every parent
+        # the file may have. A same-parent rename touches only the name
+        # and needs no parent resolution or makedirs (the parent already exists,
+        # since the source lives there).
+        reparent: dict[str, Any] = {}
+        if dest_parent != src_parent:
+            self.makedirs(dest_parent, exist_ok=True)
+            reparent = {
+                "addParents": self._path_to_id(dest_parent),
+                "removeParents": self._path_to_id(src_parent),
+            }
+
+        LOGGER.debug("Moving %s (id=%s) to %s", path1, source["id"], destination)
+        out: File = self.files.update(
+            fileId=source["id"],
+            body={"name": dest_name},
+            # Request the full info mask so the cached entry carries size/mimeType.
+            fields=INFO_FIELDS,
+            supportsAllDrives=True,
+            **reparent,
+        ).execute(num_retries=_NUM_RETRIES)
+
+        # Old location: drop the source from its parent listing.
+        if src_parent in self.dircache:
+            self.dircache[src_parent] = [
+                li for li in self.dircache[src_parent] if li["name"] != path1
+            ]
+        # A moved directory's own listing and every descendant key are now keyed
+        # by a stale path; drop the whole subtree so it re-lists lazily.
+        if source["type"] == "directory":
+            for key in self._cached_subtree(path1):
+                self.dircache.pop(key, None)
+        # New location: record the moved item in the destination parent listing.
+        if dest_parent in self.dircache:
+            self.dircache[dest_parent] = [
+                li for li in self.dircache[dest_parent] if li["name"] != destination
+            ]
             self.dircache[dest_parent].append(
                 _finfo_from_response(out, path_prefix=dest_parent)
             )
