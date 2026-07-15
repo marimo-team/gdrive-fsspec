@@ -316,6 +316,11 @@ def fs_factory(_integration_instances: list[GoogleDriveFileSystem]) -> ProfiledF
         profile = _require_profile(profile_id)
 
         def _make(**overrides: Any) -> GoogleDriveFileSystem:
+            fresh = overrides.pop("_fresh", False)
+            if fresh:
+                instance = _build_fs(profile, **overrides)
+                _integration_instances.append(instance)
+                return instance
             key = (profile_id, tuple(sorted(overrides.items())))
             if key not in instance_cache:
                 instance_cache[key] = _build_fs(profile, **overrides)
@@ -353,7 +358,7 @@ def make_fs(_make_fs: FsFactory) -> FsFactory:
     """
 
     def _make(**overrides: Any) -> GoogleDriveFileSystem:
-        instance = _make_fs(**overrides)
+        instance = _make_fs(_fresh=True, **overrides)
         _prepare_cached_instance(instance)
         return instance
 
