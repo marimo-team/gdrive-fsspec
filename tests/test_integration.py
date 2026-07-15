@@ -305,8 +305,9 @@ def test_copy_recursive_overwrites_colliding_files(
 
 @pytest.mark.integration
 def test_mv_over_existing_destination(fs: GoogleDriveFileSystem) -> None:
-    # mv (copy-then-trash) onto an existing destination overwrites it instead of
-    # failing on a name clash, and the source is gone afterwards.
+    # A native mv onto an existing destination overwrites it (the old file is
+    # trashed first) instead of failing on a name clash, leaving exactly one
+    # live file at the destination and none at the source.
     src = _test_path("mv_over_src.txt")
     dst = _test_path("mv_over_dst.txt")
     with fs.open(src, "wb") as f:
@@ -362,13 +363,13 @@ def test_cp_file_preserves_larger_content(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
-def test_mv_via_copy_then_trash(fs: GoogleDriveFileSystem) -> None:
-    # With cp_file implemented, the inherited mv is copy-then-rm. rm defaults to
-    # trash, so the destination holds the content and the source leaves the
-    # default listing but remains recoverable from trash.
+def test_mv_preserves_file_id_and_moves_no_bytes(fs: GoogleDriveFileSystem) -> None:
+    # Native mv is a single metadata update: the destination keeps the SAME file
+    # id (no copy-then-delete), and the source path is gone without a trashed
+    # duplicate left behind.
     src = _test_path("mv_src.txt")
     dst = _test_path("mv_dst.txt")
-    data = b"move me via copy"
+    data = b"move me in place"
     with fs.open(src, "wb") as f:
         f.write(data)
     original_id = fs.info(src)["id"]
@@ -377,10 +378,150 @@ def test_mv_via_copy_then_trash(fs: GoogleDriveFileSystem) -> None:
 
     assert fs.cat(dst) == data
     assert not fs.exists(src)
-    # copy-then-delete produces a new file id at the destination.
-    assert fs.info(dst)["id"] != original_id
-    # Source was trashed (default), not permanently deleted.
-    assert fs.info(src, trashed=True)["trashed"] is True
+    # A metadata move relocates the existing resource, so the id is preserved.
+    assert fs.info(dst)["id"] == original_id
+    # The source path is not left as a trashed copy (nothing was duplicated).
+    assert not fs.exists(src, trashed=True)
+
+
+@pytest.mark.integration
+def test_mv_rename_in_same_directory(fs: GoogleDriveFileSystem) -> None:
+    # A same-parent rename changes only the name; the file id is preserved and
+    # the parent listing shows the new name (and not the old).
+    src = _test_path("mv_rename_before.txt")
+    dst = _test_path("mv_rename_after.txt")
+    data = b"rename me"
+    with fs.open(src, "wb") as f:
+        f.write(data)
+    original_id = fs.info(src)["id"]
+
+    fs.mv(src, dst)
+
+    assert fs.info(dst)["id"] == original_id
+    assert fs.cat(dst) == data
+    names = fs.ls(TESTDIR)
+    assert dst in names
+    assert src not in names
+
+
+@pytest.mark.integration
+def test_mv_directory_moves_subtree(fs: GoogleDriveFileSystem) -> None:
+    # Moving a directory relocates its whole subtree in a single metadata update
+    # (recursive is irrelevant), preserving the folder id and its children.
+    src_dir = _test_path("mv_dir_src")
+    dst_dir = _test_path("mv_dir_dst")
+    fs.makedirs(f"{src_dir}/nested")
+    with fs.open(f"{src_dir}/a.txt", "wb") as f:
+        f.write(b"a")
+    with fs.open(f"{src_dir}/nested/b.txt", "wb") as f:
+        f.write(b"b")
+    original_dir_id = fs.info(src_dir)["id"]
+
+    fs.mv(src_dir, dst_dir)
+
+    assert not fs.exists(src_dir)
+    assert fs.info(dst_dir)["id"] == original_dir_id
+    assert fs.cat(f"{dst_dir}/a.txt") == b"a"
+    assert fs.cat(f"{dst_dir}/nested/b.txt") == b"b"
+
+
+@pytest.mark.integration
+def test_mv_across_directories_preserves_id(fs: GoogleDriveFileSystem) -> None:
+    # A cross-directory move re-parents the resource in place: same file id, gone
+    # from the source directory, present in the destination directory.
+    src_dir = _test_path("mv_x_src")
+    dst_dir = _test_path("mv_x_dst")
+    fs.makedirs(src_dir)
+    fs.makedirs(dst_dir)
+    src = f"{src_dir}/f.txt"
+    dst = f"{dst_dir}/f.txt"
+    with fs.open(src, "wb") as f:
+        f.write(b"reparent me")
+    original_id = fs.info(src)["id"]
+
+    fs.mv(src, dst)
+
+    assert fs.info(dst)["id"] == original_id
+    assert fs.cat(dst) == b"reparent me"
+    assert src not in fs.ls(src_dir)
+    assert dst in fs.ls(dst_dir)
+
+
+@pytest.mark.integration
+def test_mv_into_existing_directory(fs: GoogleDriveFileSystem) -> None:
+    # When the destination is an existing directory, the file is moved *into* it
+    # under the source's basename (POSIX mv-into-directory semantics).
+    src = _test_path("mv_into_src.txt")
+    dst_dir = _test_path("mv_into_dir")
+    fs.makedirs(dst_dir)
+    with fs.open(src, "wb") as f:
+        f.write(b"into the dir")
+    original_id = fs.info(src)["id"]
+
+    fs.mv(src, dst_dir)
+
+    landed = f"{dst_dir}/mv_into_src.txt"
+    assert fs.info(landed)["id"] == original_id
+    assert fs.cat(landed) == b"into the dir"
+    assert not fs.exists(src)
+
+
+@pytest.mark.integration
+def test_mv_into_own_parent_directory_is_noop(fs: GoogleDriveFileSystem) -> None:
+    # Moving a file "into" the directory it already lives in resolves back to the
+    # same resource and leaves it untouched.
+    src_dir = _test_path("mv_noop_dir")
+    fs.makedirs(src_dir)
+    src = f"{src_dir}/f.txt"
+    with fs.open(src, "wb") as f:
+        f.write(b"stay put")
+    original_id = fs.info(src)["id"]
+
+    fs.mv(src, src_dir)
+
+    assert fs.exists(src)
+    assert fs.info(src)["id"] == original_id
+    assert fs.cat(src) == b"stay put"
+
+
+@pytest.mark.integration
+def test_mv_directory_over_existing_file_raises(fs: GoogleDriveFileSystem) -> None:
+    # A directory cannot overwrite an existing file at the destination.
+    src_dir = _test_path("mv_conflict_dir")
+    dst = _test_path("mv_conflict_dst.txt")
+    fs.makedirs(src_dir)
+    with fs.open(f"{src_dir}/inner.txt", "wb") as f:
+        f.write(b"inner")
+    with fs.open(dst, "wb") as f:
+        f.write(b"occupied by a file")
+
+    with pytest.raises(NotADirectoryError):
+        fs.mv(src_dir, dst)
+
+    # Both operands survive the refused move.
+    assert fs.isdir(src_dir)
+    assert fs.cat(dst) == b"occupied by a file"
+
+
+@pytest.mark.integration
+def test_mv_into_directory_with_same_named_subdir_raises(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # Moving a file into a directory that already holds a subdirectory of the
+    # source's name cannot overwrite that folder with a file.
+    src = _test_path("mv_samesub_src.txt")
+    dst_dir = _test_path("mv_samesub_dir")
+    # dst_dir already contains a subdirectory named like the source file.
+    fs.makedirs(f"{dst_dir}/mv_samesub_src.txt")
+    with fs.open(src, "wb") as f:
+        f.write(b"cannot clobber a folder")
+
+    with pytest.raises(IsADirectoryError):
+        fs.mv(src, dst_dir)
+
+    # The source file is untouched by the refused move.
+    assert fs.cat(src) == b"cannot clobber a folder"
+    assert fs.isdir(f"{dst_dir}/mv_samesub_src.txt")
 
 
 # ---------------------------------------------------------------------------
