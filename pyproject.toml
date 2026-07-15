@@ -38,6 +38,7 @@ dev = [
     "pyrefly>=1.1.1",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.15.16",
 ]
 
@@ -56,6 +57,7 @@ addopts = """\
 
 markers = [
     "integration: marks test as integration test consuming external resources (select with '-m integration')",
+    "xdist_group(name): assign tests to the same pytest-xdist worker (pytest-xdist)",
 ]
 
 [tool.ruff.lint]

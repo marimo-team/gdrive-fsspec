@@ -2,6 +2,7 @@
 # Integration tests (require live Google Drive credentials)
 #
 # Run: uv run pytest -v -m integration
+# Parallel: uv run pytest -v -m integration -n auto --dist loadgroup
 #
 # Each profile targets a different drive and has different roles.
 # Any profile whose variables are unset is skipped, so you can run a subset locally.
@@ -31,7 +32,12 @@ import pytest
 from conftest import TESTDIR, FsFactory
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec._constants import MultipleFilesError
+from gdrive_fsspec._constants import (
+    _CHANGES_FIELDS,
+    _CHANGES_PAGE_SIZE,
+    _NUM_RETRIES,
+    MultipleFilesError,
+)
 from gdrive_fsspec._file import GoogleDriveFile
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
@@ -499,21 +505,50 @@ def test_sa_my_drive_upload_exceeds_quota(
 # removed=True with no file resource.
 # ---------------------------------------------------------------------------
 
-_SYNC_RETRIES = 12
+# Backoff schedule for eventually-consistent Drive change-feed polling. Shorter
+# early intervals exit quickly when the feed is warm; later intervals preserve
+# the ~12s worst-case budget of the original fixed 1s polling.
+_SYNC_POLL_DELAYS_S = (0.0, 0.15, 0.25, 0.4, 0.5, 0.75, 1.0, 1.0, 1.5, 1.5, 2.0, 2.0)
 
 
 def _until(predicate: Callable[[], bool]) -> bool:
-    """Poll ``predicate`` up to ``_SYNC_RETRIES`` times, ~1s apart.
-
-    Checks at the start of each attempt and sleeps only *between* attempts, so
-    there are exactly ``_SYNC_RETRIES`` calls and no wasted trailing sleep.
-    """
-    for attempt in range(_SYNC_RETRIES):
-        if attempt:
-            time.sleep(1)
+    """Poll ``predicate`` with short-then-long sleeps between attempts."""
+    for delay in _SYNC_POLL_DELAYS_S:
+        if delay:
+            time.sleep(delay)
         if predicate():
             return True
     return False
+
+
+def _find_change_since(
+    fs: GoogleDriveFileSystem, page_token: str, file_id: str
+) -> dict[str, Any] | None:
+    """Return the change for ``file_id`` since ``page_token``, if present.
+
+    Pages through the change feed only until a matching entry is found,
+    avoiding a full drain when the target change appears early.
+    """
+    scope = fs._changes_scope_kw()
+    token: str | None = page_token
+    while token is not None:
+        response = (
+            fs.service.changes()
+            .list(
+                pageToken=token,
+                spaces=fs.spaces,
+                includeRemoved=True,
+                fields=_CHANGES_FIELDS,
+                pageSize=_CHANGES_PAGE_SIZE,
+                **scope,
+            )
+            .execute(num_retries=_NUM_RETRIES)
+        )
+        for change in response.get("changes", []):
+            if change.get("fileId") == file_id:
+                return cast("dict[str, Any]", change)
+        token = response.get("nextPageToken")
+    return None
 
 
 def _await_change_for(
@@ -528,12 +563,12 @@ def _await_change_for(
     the feed is eventually consistent, so advancing could move past a change
     that occurred before the token but only becomes visible on a later poll.
     """
-    for _ in range(_SYNC_RETRIES):
-        changes, _ = fs._iter_changes(start_token)
-        for change in changes:
-            if change.get("fileId") == file_id:
-                return cast("dict[str, Any]", change)
-        time.sleep(1)
+    for delay in _SYNC_POLL_DELAYS_S:
+        if delay:
+            time.sleep(delay)
+        change = _find_change_since(fs, start_token, file_id)
+        if change is not None:
+            return change
     raise AssertionError(f"no change for {file_id} appeared in the feed")
 
 
@@ -819,10 +854,13 @@ def test_changes_sync_ttl_suppresses_polling(
     new_file = f"{subdir}/late.txt"
     with other.open(new_file, "wb") as handle:
         handle.write(b"later")
+    file_id = other.info(new_file)["id"]
+    start_token = watcher._changes_page_token
+    assert start_token is not None
 
-    # Give the feed time to carry the change, then confirm the TTL keeps us from
+    # Wait until the change is in the feed, then confirm the TTL keeps us from
     # seeing it (served from the warm cache, no poll).
-    time.sleep(5)
+    _await_change_for(other, start_token, file_id)
     assert watcher.ls(subdir) == []
 
     # Force the next read past the interval; now the sync runs and reconciles.

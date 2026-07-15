@@ -10,7 +10,11 @@ from gdrive_fsspec import GoogleDriveFileSystem
 from gdrive_fsspec._constants import AuthMethod
 from gdrive_fsspec.types import FileInfo
 
-TESTDIR = "gdrive_fsspec_testdir"
+TESTDIR = (
+    "gdrive_fsspec_testdir"
+    if os.environ.get("PYTEST_XDIST_WORKER", "master") == "master"
+    else f"gdrive_fsspec_testdir_{os.environ['PYTEST_XDIST_WORKER']}"
+)
 
 FsFactory = Callable[..., GoogleDriveFileSystem]
 
@@ -278,8 +282,8 @@ def _remove_testdir(instance: GoogleDriveFileSystem) -> None:
             continue
 
 
-def _reset_testdir(instance: GoogleDriveFileSystem) -> None:
-    """Give ``instance`` a fresh, empty ``TESTDIR``."""
+def _ensure_testdir(instance: GoogleDriveFileSystem) -> None:
+    """Give ``instance`` a fresh, empty ``TESTDIR`` once per session."""
     _remove_testdir(instance)
     instance.mkdir(TESTDIR, create_parents=True)
 
@@ -287,66 +291,118 @@ def _reset_testdir(instance: GoogleDriveFileSystem) -> None:
 ProfiledFactory = Callable[[str], FsFactory]
 
 
-@pytest.fixture()
-def fs_factory() -> Generator[ProfiledFactory, None, None]:
-    """Build live filesystems for any profile, cleaning up ``TESTDIR`` afterwards.
+@pytest.fixture(scope="session")
+def _integration_instances() -> Generator[list[GoogleDriveFileSystem], None, None]:
+    """Live filesystems created during integration tests; cleaned up once at session end."""
+    created: list[GoogleDriveFileSystem] = []
+    yield created
+    for instance in created:
+        _remove_testdir(instance)
+
+
+@pytest.fixture(scope="session")
+def fs_factory(_integration_instances: list[GoogleDriveFileSystem]) -> ProfiledFactory:
+    """Build live filesystems for any profile, reusing instances within a session.
 
     ``fs_factory(profile_id)`` returns a factory that constructs as many
     instances of that profile as a test needs (e.g. a second one rooted at a
-    different ``root_file_id``). Every instance created through this fixture has
-    its ``TESTDIR`` removed during teardown.
+    different ``root_file_id``). Identical constructor arguments reuse the same
+    instance so auth and drive resolution are not repeated for every test.
+    ``TESTDIR`` is removed once when the session ends.
     """
-    created: list[GoogleDriveFileSystem] = []
+    instance_cache: dict[tuple[Any, ...], GoogleDriveFileSystem] = {}
 
     def _for(profile_id: str) -> FsFactory:
         profile = _require_profile(profile_id)
 
         def _make(**overrides: Any) -> GoogleDriveFileSystem:
-            instance = _build_fs(profile, **overrides)
-            created.append(instance)
-            return instance
+            fresh = overrides.pop("_fresh", False)
+            if fresh:
+                instance = _build_fs(profile, **overrides)
+                _integration_instances.append(instance)
+                return instance
+            key = (profile_id, tuple(sorted(overrides.items())))
+            if key not in instance_cache:
+                instance_cache[key] = _build_fs(profile, **overrides)
+                _integration_instances.append(instance_cache[key])
+            return instance_cache[key]
 
         return _make
 
-    yield _for
+    return _for
 
-    for instance in created:
-        _remove_testdir(instance)
+
+@pytest.fixture(scope="session")
+def _make_fs(fs_factory: ProfiledFactory) -> FsFactory:
+    """Session-cached factory for the default identity."""
+    return fs_factory(_default_profile_id())
+
+
+def _prepare_cached_instance(instance: GoogleDriveFileSystem) -> None:
+    """Reset cache/sync state on a reused instance before a test uses it."""
+    instance.invalidate_cache()
+    instance._last_sync_monotonic = None
+    if instance._changes_sync_interval is not None:
+        # Clear so the test's first sync baselines after its own setup mutations.
+        instance._changes_page_token = None
 
 
 @pytest.fixture()
-def make_fs(fs_factory: ProfiledFactory) -> FsFactory:
+def make_fs(_make_fs: FsFactory) -> FsFactory:
     """Factory for the default identity's filesystems.
 
     Full-access service account when ``GDRIVE_FSSPEC_CREDENTIALS_PATH`` is set,
     otherwise the OAuth user identity, so the same CRUD suite runs either way.
+    Reused instances are reset before each test so change-feed state does not
+    leak across tests.
     """
-    return fs_factory(_default_profile_id())
+
+    def _make(**overrides: Any) -> GoogleDriveFileSystem:
+        instance = _make_fs(_fresh=True, **overrides)
+        _prepare_cached_instance(instance)
+        return instance
+
+    return _make
 
 
-@pytest.fixture()
-def fs(make_fs: FsFactory) -> GoogleDriveFileSystem:
-    """A single default-identity filesystem with a fresh ``TESTDIR`` already created."""
-    instance = make_fs()
-    _reset_testdir(instance)
+@pytest.fixture(scope="session")
+def _default_fs(_make_fs: FsFactory) -> GoogleDriveFileSystem:
+    """Default-identity filesystem with ``TESTDIR`` ensured for the session."""
+    instance = _make_fs()
+    _ensure_testdir(instance)
     return instance
 
 
 @pytest.fixture()
-def content_manager_fs(fs_factory: ProfiledFactory) -> GoogleDriveFileSystem:
-    """A content-manager filesystem with a fresh ``TESTDIR`` (can trash, not delete)."""
+def fs(_default_fs: GoogleDriveFileSystem) -> GoogleDriveFileSystem:
+    """Default-identity filesystem; cache cleared before each test."""
+    _default_fs.invalidate_cache()
+    return _default_fs
+
+
+@pytest.fixture(scope="session")
+def _content_manager_fs(fs_factory: ProfiledFactory) -> GoogleDriveFileSystem:
     instance = fs_factory(CONTENT_MANAGER)()
-    _reset_testdir(instance)
+    _ensure_testdir(instance)
     return instance
 
 
 @pytest.fixture()
+def content_manager_fs(
+    _content_manager_fs: GoogleDriveFileSystem,
+) -> GoogleDriveFileSystem:
+    """A content-manager filesystem (can trash, not delete)."""
+    _content_manager_fs.invalidate_cache()
+    return _content_manager_fs
+
+
+@pytest.fixture(scope="session")
 def readonly_fs(fs_factory: ProfiledFactory) -> GoogleDriveFileSystem:
     """A viewer-only filesystem (list/read succeed; every mutation is denied)."""
     return fs_factory(READONLY)()
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def sa_my_drive_fs(fs_factory: ProfiledFactory) -> GoogleDriveFileSystem:
     """A service-account filesystem with no shared drive (quota-less My Drive)."""
     return fs_factory(SA_MY_DRIVE)()
@@ -358,3 +414,23 @@ def requires_shared_drive() -> None:
     drive = _drive_value(PROFILES[FULL_ACCESS])
     if not drive or not drive.strip():
         pytest.skip("full-access shared drive not configured")
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Optionally group changes-sync tests on one xdist worker.
+
+    Set ``GDRIVE_FSSPEC_SERIAL_SYNC=1`` to pin ``test_changes_sync_*`` to a
+    single worker. Default: sync tests distribute across workers (each worker
+    has its own ``TESTDIR``; tests tolerate unrelated feed events).
+    """
+    if not config.pluginmanager.hasplugin("xdist"):
+        return
+    if not os.getenv("GDRIVE_FSSPEC_SERIAL_SYNC"):
+        return
+    for item in items:
+        if item.get_closest_marker("integration") is not None and item.name.startswith(
+            "test_changes_sync"
+        ):
+            item.add_marker(pytest.mark.xdist_group(name="changes_sync"))
