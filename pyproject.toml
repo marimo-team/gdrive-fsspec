@@ -34,13 +34,13 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.2.0",
-    "google-api-python-client-stubs>=1.37.0",
-    "pyrefly>=1.1.1",
-    "pytest>=9.0.3",
+    "pre-commit>=4.6.2",
+    "google-api-python-client-stubs>=1.40.0",
+    "pyrefly>=1.2.0",
+    "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.15.16",
+    "ruff>=0.16.6",
 ]
 
 [project.urls]
@@ -62,7 +62,9 @@ markers = [
 ]
 
 [tool.ruff.lint]
-extend-select = ["I", "B"]
+# Keep the lint policy stable across Ruff releases; Ruff 0.16 substantially
+# expanded its defaults and removed some previously enabled E/F rules.
+select = ["E4", "E7", "E9", "F", "I", "B"]
 
 [tool.pyrefly]
 preset = "strict"

@@ -18,6 +18,10 @@ from gdrive_fsspec._file import (
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
+def _no_sleep(*_args: Any, **_kwargs: Any) -> None:
+    pass
+
+
 @pytest.fixture(autouse=True)
 def _fast_upload_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Neutralize the resumable-upload retry backoff so retry paths are instant.
@@ -25,7 +29,7 @@ def _fast_upload_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_authed_request`` sleeps with exponential backoff between attempts; tests
     that exercise retryable statuses would otherwise add real wall-clock delay.
     """
-    monkeypatch.setattr("gdrive_fsspec._file.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr("gdrive_fsspec._file.time.sleep", _no_sleep)
 
 
 def _rate_limit_403_body() -> bytes:
