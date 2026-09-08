@@ -1,6 +1,7 @@
 import os
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
-from typing import Any, Callable, Generator, NamedTuple
+from typing import Any, NamedTuple
 from unittest import mock
 
 import pytest
@@ -195,7 +196,7 @@ def _oauth_cache_available() -> bool:
         import pydata_google_auth.cache
 
         path = pydata_google_auth.cache.READ_WRITE._path
-    except Exception:
+    except (AttributeError, ImportError):
         return False
     return bool(path) and os.path.exists(path)
 

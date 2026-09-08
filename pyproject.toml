@@ -62,9 +62,7 @@ markers = [
 ]
 
 [tool.ruff.lint]
-# Keep the lint policy stable across Ruff releases; Ruff 0.16 substantially
-# expanded its defaults and removed some previously enabled E/F rules.
-select = ["E4", "E7", "E9", "F", "I", "B"]
+extend-select = ["I", "B"]
 
 [tool.pyrefly]
 preset = "strict"

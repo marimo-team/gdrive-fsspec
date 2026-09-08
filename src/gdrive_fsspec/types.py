@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from typing_extensions import TypedDict
-
-if TYPE_CHECKING:
-    from googleapiclient._apis.drive.v3.resources import DriveResource
-    from googleapiclient._apis.drive.v3.schemas import Drive, File
-
-    FilesResource = DriveResource.FilesResource
 
 
 class _FsspecRequired(TypedDict):
@@ -45,4 +39,4 @@ class FileInfo(_FsspecRequired, _DrivePartialFields, extra_items=Any):
     """fsspec file-info dict: normalized path fields plus Drive API metadata."""
 
 
-__all__ = ["Drive", "DriveResource", "File", "FileInfo", "FilesResource"]
+__all__ = ["FileInfo"]

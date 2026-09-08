@@ -1,7 +1,8 @@
 """Unit tests for GoogleDriveFileSystem directory and path operations."""
 
 import pathlib
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from unittest import mock
 
 import pytest

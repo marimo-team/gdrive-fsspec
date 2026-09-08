@@ -213,12 +213,11 @@ class GoogleDriveFile(AbstractBufferedFile):
             # end (``None``) means "through EOF", expressed as ``bytes=<start>-``.
             range_start = start or 0
             if end is not None:
-                self._media_object.headers["Range"] = "bytes=%i-%i" % (
-                    range_start,
-                    end - 1,
+                self._media_object.headers["Range"] = (
+                    f"bytes={range_start:d}-{end - 1:d}"
                 )
             else:
-                self._media_object.headers["Range"] = "bytes=%i-" % range_start
+                self._media_object.headers["Range"] = f"bytes={range_start:d}-"
         else:
             self._media_object.headers.pop("Range", None)
         try:
@@ -305,16 +304,15 @@ class GoogleDriveFile(AbstractBufferedFile):
             raise RuntimeError("upload chunk before _initiate_upload set the location")
         if final and self.autocommit:
             if length:
-                part = "%i-%i" % (self.offset, self.offset + length - 1)
-                head["Content-Range"] = "bytes %s/%i" % (part, self.offset + length)
+                part = f"{self.offset:d}-{self.offset + length - 1:d}"
+                head["Content-Range"] = f"bytes {part}/{self.offset + length:d}"
             else:
                 # closing when buffer is empty
-                head["Content-Range"] = "bytes */%i" % self.offset
+                head["Content-Range"] = f"bytes */{self.offset:d}"
                 data = None
         else:
-            head["Content-Range"] = "bytes %i-%i/*" % (
-                self.offset,
-                self.offset + length - 1,
+            head["Content-Range"] = (
+                f"bytes {self.offset:d}-{self.offset + length - 1:d}/*"
             )
         head.update(
             {"Content-Type": "application/octet-stream", "Content-Length": str(length)}
@@ -328,7 +326,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         status = int(response["status"])
         if status >= 400:
             error_message = body.decode("utf-8", errors="replace")
-            raise IOError(f"Chunk upload failed (HTTP {status}): {error_message}")
+            raise OSError(f"Chunk upload failed (HTTP {status}): {error_message}")
         if status in [200, 201]:
             # server thinks we are finished - this should happen
             # only when closing
@@ -349,14 +347,14 @@ class GoogleDriveFile(AbstractBufferedFile):
                     listing.append(info)
             return True
         if status != 308:
-            raise IOError(f"Unexpected resumable status {status}")
+            raise OSError(f"Unexpected resumable status {status}")
         # A 308 on a finalizing PUT means the server did not commit the object.
         # This path sends a concrete total and expects 200/201; treating the
         # 308 as a partial-consumption signal would silently leave the upload
         # unfinalized, since commit()/close() flush only once and ignore the
         # re-buffer. Fail loudly instead.
         if final and self.autocommit:
-            raise IOError(
+            raise OSError(
                 f"Resumable upload not finalized: server returned 308 "
                 f"(range {response.get('range')!r}) on the final chunk"
             )
@@ -383,7 +381,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         # this buffer; the server should never report an end behind our offset.
         accepted = 0 if stored_end is None else stored_end + 1 - offset
         if accepted < 0 or accepted > len(data):
-            raise IOError(
+            raise OSError(
                 f"Server reported {accepted} accepted bytes outside the {len(data)}-byte chunk at offset {offset}"
             )
         if accepted == len(data):
@@ -435,7 +433,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             )
         status = int(response["status"])
         if status >= 400:
-            raise IOError(f"Init upload failed with status {status}")
+            raise OSError(f"Init upload failed with status {status}")
         self.location = response["location"]
 
     @override
@@ -459,5 +457,5 @@ class GoogleDriveFile(AbstractBufferedFile):
         )
         status = int(response["status"])
         if not (status < 400 or status == 499):
-            raise IOError(f"Cancel upload failed with status {status}")
+            raise OSError(f"Cancel upload failed with status {status}")
         self.location = None

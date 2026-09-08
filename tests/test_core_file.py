@@ -307,11 +307,13 @@ def test_open_threads_export_mime_type(mocked_fs: MockedDriveFS) -> None:
     )
     mocked_fs.files.export_media.return_value = mock.Mock()
 
-    with mock.patch(
-        "gdrive_fsspec.core.MediaIoBaseDownload", _fake_downloader(b"%PDF-1.4")
+    with (
+        mock.patch(
+            "gdrive_fsspec.core.MediaIoBaseDownload", _fake_downloader(b"%PDF-1.4")
+        ),
+        fs.open("doc", "rb", export_mime_type="application/pdf") as handle,
     ):
-        with fs.open("doc", "rb", export_mime_type="application/pdf") as handle:
-            assert handle.read() == b"%PDF-1.4"
+        assert handle.read() == b"%PDF-1.4"
 
     mocked_fs.files.export_media.assert_called_once_with(
         fileId="doc-id", mimeType="application/pdf"
@@ -612,7 +614,7 @@ def test_consume_accepted_none_data_returns_true(mocked_fs: MockedDriveFS) -> No
 
 
 def test_consume_accepted_full_accept_returns_true(mocked_fs: MockedDriveFS) -> None:
-    result, file = _consume(mocked_fs.fs, b"x" * 100, "bytes=0-99", offset=0)
+    result, _ = _consume(mocked_fs.fs, b"x" * 100, "bytes=0-99", offset=0)
     assert result is True
 
 
