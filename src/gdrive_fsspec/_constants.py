@@ -4,7 +4,8 @@ import logging
 import os
 import pathlib
 import ssl
-from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import httplib2
 
@@ -130,7 +131,7 @@ class MultipleFilesError(FileNotFoundError):
 
 def _normalize_path(prefix: str, name: str) -> str:
     raw_prefix = prefix.strip("/")
-    return "/" + "/".join([raw_prefix, name])
+    return f"/{raw_prefix}/{name}"
 
 
 def _finfo_from_response(

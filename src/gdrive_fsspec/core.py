@@ -5,14 +5,13 @@ import json
 import os
 import time
 import warnings
+from collections.abc import Mapping, MutableMapping
 from functools import cached_property
 from glob import has_magic
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Mapping,
-    MutableMapping,
     overload,
 )
 
@@ -59,7 +58,7 @@ if TYPE_CHECKING:
     from googleapiclient._apis.drive.v3.resources import DriveResource
     from googleapiclient._apis.drive.v3.schemas import Change, Drive, File
 
-    from .types import FilesResource
+    FilesResource = DriveResource.FilesResource
 
 
 class _PageListKwargs(TypedDict, total=False):
@@ -311,7 +310,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             if not self.creds.strip():
                 raise ValueError("Empty credentials are not allowed")
             if self.creds[0] != "{":
-                creds = json.load(open(self.creds))
+                with open(self.creds) as credentials_file:
+                    creds = json.load(credentials_file)
             else:
                 creds = json.loads(self.creds)
         else:
@@ -805,7 +805,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self._last_sync_monotonic = now
         try:
             self._sync_cache()
-        except Exception:
+        except Exception:  # noqa: BLE001 -- cache synchronization is best-effort
             LOGGER.warning("Cache sync failed; serving cached listings", exc_info=True)
 
     def _sync_cache(self) -> None:
@@ -854,7 +854,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         """Baseline Changes page token for this instance's corpus."""
         kwargs: dict[str, Any] = {}
         if self.drive is not None:
-            kwargs = dict(driveId=self.drive, supportsAllDrives=True)
+            kwargs = {"driveId": self.drive, "supportsAllDrives": True}
         response = (
             self.service.changes()
             .getStartPageToken(**kwargs)
@@ -908,11 +908,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         ``files.list`` parameter that ``changes.list`` does not accept.
         """
         if self.drive is not None:
-            return dict(
-                driveId=self.drive,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-            )
+            return {
+                "driveId": self.drive,
+                "includeItemsFromAllDrives": True,
+                "supportsAllDrives": True,
+            }
         return {}
 
     @cached_property
@@ -1377,15 +1377,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:
-            return dict(
-                includeItemsFromAllDrives=True,
-                corpora="drive",
-                supportsAllDrives=True,
-                driveId=self.drive,
-            )
-        else:
-            empty: dict[str, Any] = {}
-            return empty
+            return {
+                "includeItemsFromAllDrives": True,
+                "corpora": "drive",
+                "supportsAllDrives": True,
+                "driveId": self.drive,
+            }
+        return {}
 
     def _parent_query_id(self, file_id: str) -> str:
         """Id to use in a ``'<id>' in parents`` filter.

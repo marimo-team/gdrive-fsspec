@@ -26,7 +26,8 @@
 # ---------------------------------------------------------------------------
 
 import time
-from typing import Any, Callable, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 from conftest import TESTDIR, FsFactory
@@ -572,9 +573,11 @@ def test_readonly_lists_root(readonly_fs: GoogleDriveFileSystem) -> None:
 def test_readonly_write_is_denied(readonly_fs: GoogleDriveFileSystem) -> None:
     # Uploads run the resumable-session initiation, which surfaces the 403 as an
     # OSError (IOError) rather than a raw HttpError.
-    with pytest.raises(OSError):
-        with readonly_fs.open("gdrive_fsspec_readonly_probe", "wb") as f:
-            f.write(b"nope")
+    with (
+        pytest.raises(OSError),
+        readonly_fs.open("gdrive_fsspec_readonly_probe", "wb") as f,
+    ):
+        f.write(b"nope")
 
 
 @pytest.mark.integration
@@ -617,9 +620,11 @@ def test_sa_my_drive_upload_exceeds_quota(
 ) -> None:
     # Service accounts cannot own files in their own My Drive (no quota), so an
     # upload must fail rather than silently succeed.
-    with pytest.raises(OSError):
-        with sa_my_drive_fs.open("gdrive_fsspec_sa_probe", "wb") as f:
-            f.write(b"no quota here")
+    with (
+        pytest.raises(OSError),
+        sa_my_drive_fs.open("gdrive_fsspec_sa_probe", "wb") as f,
+    ):
+        f.write(b"no quota here")
 
 
 # ---------------------------------------------------------------------------
@@ -1175,18 +1180,17 @@ def test_transaction_rollback_discards_upload(fs: GoogleDriveFileSystem) -> None
     class Boom(RuntimeError):
         pass
 
-    with pytest.raises(Boom):
-        with fs.transaction:
-            f = cast(
-                GoogleDriveFile,
-                fs.open(fn, "wb", block_size=block_size, autocommit=False),
-            )
-            try:
-                f.write(data)  # flushes ≥1 block → opens the resumable session
-                assert f.location is not None, "expected an open upload session"
-                raise Boom("abort before commit")
-            finally:
-                f.closed = True
+    with pytest.raises(Boom), fs.transaction:
+        f = cast(
+            GoogleDriveFile,
+            fs.open(fn, "wb", block_size=block_size, autocommit=False),
+        )
+        try:
+            f.write(data)  # flushes ≥1 block → opens the resumable session
+            assert f.location is not None, "expected an open upload session"
+            raise Boom("abort before commit")
+        finally:
+            f.closed = True
 
     # discard() clears location only after a successful DELETE/499, so this
     # proves the rollback actually cancelled the session (not merely that the
