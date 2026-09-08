@@ -59,7 +59,7 @@ A browser opens on first use; the token is cached for later sessions.
 
 ```python
 fs = GoogleDriveFileSystem(token="browser")  # first time
-fs = GoogleDriveFileSystem(token="cache")    # reuse cached token
+fs = GoogleDriveFileSystem(token="cache")  # reuse cached token
 ```
 
 On headless or remote machines (SSH, containers, CI), pass `use_local_webserver=False` in `auth_kwargs` to authenticate via the console:

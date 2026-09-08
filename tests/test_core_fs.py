@@ -23,6 +23,13 @@ from gdrive_fsspec.types import FileInfo
 from gdrive_fsspec.utils import merge_fields
 
 
+def _path_id(mapping: dict[str, str]) -> Callable[[Any], str]:
+    def resolve(path: Any) -> str:
+        return mapping[str(path)]
+
+    return resolve
+
+
 def test_mkdir_creates_folder_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.exists = mock.Mock(return_value=False)
@@ -775,7 +782,7 @@ def test_mv_reparents_across_directories(mocked_fs: MockedDriveFS) -> None:
         )
     )
     fs.makedirs = mock.Mock()
-    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    fs._path_to_id = mock.Mock(side_effect=_path_id({"b": "b-id", "a": "a-id"}))
     fs.dircache["a"] = [{"name": "a/f.txt", "id": "file-id", "size": 2, "type": "file"}]
     fs.dircache["b"] = empty_listing()
     mocked_fs.files.update.return_value.execute.return_value = {
@@ -830,7 +837,7 @@ def test_mv_overwrites_existing_destination(mocked_fs: MockedDriveFS) -> None:
         )
     )
     fs.makedirs = mock.Mock()
-    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    fs._path_to_id = mock.Mock(side_effect=_path_id({"b": "b-id", "a": "a-id"}))
     fs.dircache["a"] = [{"name": "a/f.txt", "id": "src-id", "size": 2, "type": "file"}]
     fs.dircache["b"] = [{"name": "b/f.txt", "id": "old-id", "size": 9, "type": "file"}]
     mocked_fs.files.update.return_value.execute.return_value = {
@@ -890,9 +897,7 @@ def test_mv_into_existing_directory(mocked_fs: MockedDriveFS) -> None:
         )
     )
     fs.makedirs = mock.Mock()
-    fs._path_to_id = mock.Mock(
-        side_effect=lambda p: {"dstdir": "dir-id", "a": "a-id"}[str(p)]
-    )
+    fs._path_to_id = mock.Mock(side_effect=_path_id({"dstdir": "dir-id", "a": "a-id"}))
     mocked_fs.files.update.return_value.execute.return_value = {
         "id": "file-id",
         "name": "f.txt",
@@ -1038,9 +1043,7 @@ def test_mv_directory_moves_and_drops_subtree(mocked_fs: MockedDriveFS) -> None:
         )
     )
     fs.makedirs = mock.Mock()
-    fs._path_to_id = mock.Mock(
-        side_effect=lambda p: {"dst": "dst-id", "src": "src-id"}[str(p)]
-    )
+    fs._path_to_id = mock.Mock(side_effect=_path_id({"dst": "dst-id", "src": "src-id"}))
     fs.dircache["src"] = [
         {
             "name": "src/movable",
@@ -1105,7 +1108,7 @@ def test_mv_without_cached_parent_skips_dircache_update(
         )
     )
     fs.makedirs = mock.Mock()
-    fs._path_to_id = mock.Mock(side_effect=lambda p: {"b": "b-id", "a": "a-id"}[str(p)])
+    fs._path_to_id = mock.Mock(side_effect=_path_id({"b": "b-id", "a": "a-id"}))
     mocked_fs.files.update.return_value.execute.return_value = {
         "id": "file-id",
         "name": "f.txt",
@@ -1534,9 +1537,11 @@ def test_resolve_entry_cold_deep_path_uses_targeted_queries(
         ("a-id", "b"): _dir_entry("a/b", "b-id"),
         ("b-id", "f"): _file_entry("a/b/f", "f-id"),
     }
-    anon_fs._find_child_by_name = mock.Mock(
-        side_effect=lambda parent_id, name, **kw: by_parent[(parent_id, name)]
-    )
+
+    def find_child(parent_id: str, name: str, **_kwargs: Any) -> FileInfo:
+        return by_parent[(parent_id, name)]
+
+    anon_fs._find_child_by_name = mock.Mock(side_effect=find_child)
     anon_fs._list_children = mock.Mock()
 
     entry = anon_fs._resolve_entry("a/b/f")

@@ -168,7 +168,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.scopes = [SCOPE_DICT[access]]
         self.spaces = spaces
         self.creds = creds
-        self.drive = drive
+        self.drive: str | None = drive
         self.auth_kwargs = auth_kwargs or {}
         self.connect(method=token)
         if token == "anon":
