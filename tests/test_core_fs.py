@@ -13,7 +13,6 @@ from gdrive_fsspec._constants import (
     _CHANGES_FIELDS,
     _CHANGES_PAGE_SIZE,
     _NUM_RETRIES,
-    DEFAULT_BLOCK_SIZE,
     DIR_MIME_TYPE,
     INFO_FIELDS,
     ROOT_ID,
@@ -1926,9 +1925,8 @@ def test_export_streams_via_export_media(mocked_fs: MockedDriveFS) -> None:
     request = mock.Mock()
     mocked_fs.files.export_media.return_value = request
 
-    def fake_downloader(buffer: ReadSnapshot, req: object, chunksize: int) -> mock.Mock:
+    def fake_downloader(buffer: ReadSnapshot, req: object) -> mock.Mock:
         assert req is request
-        assert chunksize == DEFAULT_BLOCK_SIZE
         downloader = mock.Mock()
         # Two chunks, then done; second next_chunk reports completion.
         chunks = iter([b"expo", b"rted"])
@@ -2035,7 +2033,7 @@ def test_export_without_mime_type_uses_default(mocked_fs: MockedDriveFS) -> None
     fs.info = mock.Mock(return_value={"id": "doc-id", "mimeType": DOC_MIME})
     _set_export_formats(fs, {DOC_MIME: ["application/pdf", "text/plain"]})
 
-    def fake_downloader(buffer: ReadSnapshot, req: object, chunksize: int) -> mock.Mock:
+    def fake_downloader(buffer: ReadSnapshot, req: object) -> mock.Mock:
         downloader = mock.Mock()
 
         def next_chunk(**_kwargs: object) -> tuple[mock.Mock, bool]:

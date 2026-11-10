@@ -44,14 +44,16 @@ class ReadSnapshot(io.BufferedIOBase):
         chunks: Iterable[bytes],
         *,
         max_size: int | None = None,
-        size_hint: int | None = None,
+        expected_size: int | None = None,
     ) -> ReadSnapshot:
         snapshot = cls(max_size)
         try:
-            if size_hint is not None:
-                snapshot._check_size(size_hint)
+            if expected_size is not None:
+                snapshot._check_size(expected_size)
             for chunk in chunks:
                 snapshot.write(chunk)
+            if expected_size is not None and snapshot.size != expected_size:
+                raise OSError("Snapshot stream length does not match expected size")
             snapshot.seek(0)
             return snapshot
         except BaseException:

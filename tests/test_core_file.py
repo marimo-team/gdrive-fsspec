@@ -177,10 +177,10 @@ DOC_MIME = "application/vnd.google-apps.document"
 
 def _fake_downloader(
     data: bytes,
-) -> Callable[[ReadSnapshot, object, int], mock.Mock]:
+) -> Callable[[ReadSnapshot, object], mock.Mock]:
     """A ``MediaIoBaseDownload`` replacement that writes ``data`` in one chunk."""
 
-    def factory(buffer: ReadSnapshot, request: object, chunksize: int) -> mock.Mock:
+    def factory(buffer: ReadSnapshot, request: object) -> mock.Mock:
         downloader = mock.Mock()
 
         def next_chunk(**_kwargs: object) -> tuple[mock.Mock, bool]:
@@ -300,6 +300,9 @@ def test_native_file_close_releases_snapshot(mocked_fs: MockedDriveFS) -> None:
     assert source.closed and buffer.closed
     assert file._read_source is None
     assert file.cache is None
+    with pytest.raises(ValueError, match="closed file"):
+        file._fetch_range(0, 1)
+    mocked_fs.files.get_media.assert_not_called()
 
 
 def test_native_export_limit_cleans_up_storage(mocked_fs: MockedDriveFS) -> None:

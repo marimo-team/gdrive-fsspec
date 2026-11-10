@@ -423,7 +423,7 @@ class PublicDriveClient:
 
     def _snapshot_response(self, response: requests.Response) -> ReadSnapshot:
         length = response.headers.get("Content-Length", "")
-        size_hint = (
+        expected_size = (
             int(length)
             if length.isdecimal()
             and response.headers.get("Content-Encoding", "identity") == "identity"
@@ -432,7 +432,7 @@ class PublicDriveClient:
         return ReadSnapshot.from_chunks(
             response.iter_content(READ_CHUNK_SIZE),
             max_size=self._max_snapshot_size,
-            size_hint=size_hint,
+            expected_size=expected_size,
         )
 
     def _prepare_empty(self, file_id: str) -> PublicRead:
@@ -528,4 +528,4 @@ class PublicRead:
         return data
 
     def close(self) -> None:
-        pass
+        """The filesystem owns the shared HTTP session."""

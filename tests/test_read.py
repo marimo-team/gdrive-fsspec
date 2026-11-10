@@ -82,13 +82,24 @@ def test_snapshot_limit_is_checked_before_writing() -> None:
         assert snapshot.read() == b"abcd"
 
 
-def test_snapshot_size_hint_rejects_before_reading_chunks() -> None:
+def test_snapshot_expected_size_rejects_before_reading_chunks() -> None:
     read_chunk = mock.Mock(return_value=b"large")
     with pytest.raises(OSError, match="max_snapshot_size=4"):
         ReadSnapshot.from_chunks(
-            (read_chunk() for _ in range(1)), max_size=4, size_hint=5
+            (read_chunk() for _ in range(1)), max_size=4, expected_size=5
         )
     read_chunk.assert_not_called()
+
+
+@pytest.mark.parametrize("expected_size", [3, 5])
+def test_snapshot_rejects_mismatched_stream_lengths(expected_size: int) -> None:
+    with SpooledTemporaryFile[bytes](mode="w+b") as buffer:
+        with (
+            mock.patch("gdrive_fsspec._read.SpooledTemporaryFile", return_value=buffer),
+            pytest.raises(OSError, match="stream length"),
+        ):
+            ReadSnapshot.from_chunks([b"abcd"], expected_size=expected_size)
+        assert buffer.closed
 
 
 @pytest.mark.parametrize("stream_error", [False, True])

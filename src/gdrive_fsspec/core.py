@@ -211,8 +211,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.creds = creds
         self.drive: str | None = drive or None
         self.auth_kwargs = auth_kwargs or {}
-        if token == "anon" and changes_sync_interval is not None:
-            raise ValueError("Changes sync is not supported for anonymous access")
         self.root_file_id = root_file_id or ROOT_ID
         self._api: _DriveConnection | None = None
         self._public: PublicDriveClient | None = None
@@ -1434,9 +1432,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         snapshot = ReadSnapshot(self._max_snapshot_size)
         try:
             request = self.files.export_media(fileId=file_id, mimeType=mime_type)
-            downloader = MediaIoBaseDownload(
-                snapshot, request, chunksize=DEFAULT_BLOCK_SIZE
-            )
+            downloader = MediaIoBaseDownload(snapshot, request)
             done = False
             while not done:
                 _, done = downloader.next_chunk(num_retries=_NUM_RETRIES)

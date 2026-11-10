@@ -216,6 +216,8 @@ class GoogleDriveFile(AbstractBufferedFile):
             Requested byte range, or empty bytes if the range is not satisfiable.
         """
 
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
         if self._read_source is not None:
             return self._read_source.read_range(start, end)
         if self.file_id is None:
