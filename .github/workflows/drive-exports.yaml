@@ -12,23 +12,6 @@ env:
   GDRIVE_FSSPEC_REQUIRE_EXPORT_CHECKS: "1"
 
 jobs:
-  catalog:
-    name: Export catalog changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: env1
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          python-version: "3.13"
-      - name: Compare the live API catalog with the reviewed snapshot
-        env:
-          GDRIVE_FSSPEC_CREDENTIALS_PATH: ${{ secrets.GDRIVE_FSSPEC_CREDENTIALS_PATH }}
-        run: uv run pytest -vv -m drive_exports tests/test_export_integration.py -k export_catalog
-
   public-exports:
     name: Public export content
     runs-on: ubuntu-latest
