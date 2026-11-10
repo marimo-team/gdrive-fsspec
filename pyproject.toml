@@ -31,6 +31,8 @@ dependencies = [
     "google-auth-oauthlib",
     "httplib2",
     "pydata_google_auth",
+    "requests",
+    "urllib3",
     "typing-extensions>=4.15.0",
 ]
 
@@ -43,6 +45,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.4",
+    "types-requests",
 ]
 
 [project.urls]

@@ -87,10 +87,19 @@ Service accounts have no personal storage quota. Uploads must target a [Shared D
 
 ### Anonymous (public files)
 
-For files shared publicly ("anyone with the link"), no authentication is needed:
+For a folder shared with "anyone with the link", no authentication is needed:
 
 ```python
-fs = GoogleDriveFileSystem(token="anon")
+fs = GoogleDriveFileSystem(
+    token="anon",
+    root_file_id="https://drive.google.com/drive/folders/PUBLIC_FOLDER_ID?usp=sharing",
+)
+try:
+    print(fs.ls(""))
+    with fs.open("data.csv", "rb") as f:
+        data = f.read()
+finally:
+    fs.close()
 ```
 
 See the ``GoogleDriveFileSystem`` docstring for `root_file_id`, `access`, `spaces`, and other options.

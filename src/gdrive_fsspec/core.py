@@ -6,6 +6,7 @@ import os
 import time
 import warnings
 from collections.abc import Mapping, MutableMapping
+from dataclasses import dataclass
 from functools import cached_property
 from glob import has_magic
 from typing import (
@@ -16,7 +17,7 @@ from typing import (
 )
 
 from fsspec.spec import AbstractFileSystem
-from google.auth.credentials import AnonymousCredentials, Credentials
+from google.auth.credentials import Credentials
 from google.oauth2 import service_account
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
@@ -50,6 +51,7 @@ from ._constants import (
     _normalize_path,
 )
 from ._file import GoogleDriveFile
+from ._public import PublicDriveClient, PublicReference
 from .types import FileInfo
 from .typing_utils import override
 from .utils import escape_query_str, merge_fields
@@ -59,6 +61,13 @@ if TYPE_CHECKING:
     from googleapiclient._apis.drive.v3.schemas import Change, Drive, File
 
     FilesResource = DriveResource.FilesResource
+
+
+@dataclass
+class _DriveConnection:
+    service: DriveResource
+    files: FilesResource
+    http: AuthorizedHttp
 
 
 class _PageListKwargs(TypedDict, total=False, closed=True):
@@ -106,9 +115,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     root_marker = ""
 
     if TYPE_CHECKING:
-        service: DriveResource
-        files: FilesResource
-        authed_http: AuthorizedHttp
         # pyrefly: ignore [bad-override-mutable-attribute]  # fsspec DirCache is untyped
         dircache: MutableMapping[str, list[FileInfo]]
         _auth_method: AuthMethod | None
@@ -137,13 +143,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 is also accepted here for backwards compatibility (when it cannot
                 be resolved as a file, it is treated as a shared drive and
                 ``drive`` is set from it), but this is a legacy path; prefer
-                passing ``drive`` to target a shared drive.
+                passing ``drive`` to target a shared drive. For ``token="anon"``,
+                a public folder ID or full folder URL is required.
             token: One of ``"anon"``, ``"browser"``, ``"cache"``,
                 ``"service_account"``. Using ``"browser"`` will prompt a URL to
                 be opened in a browser and cache the response for future use with
                 ``token="cache"``. ``"browser"`` removes any previously cached
-                token file, if it exists.
-            access: One of ``"full_control"``, ``"read_only"``.
+                token file, if it exists. ``"anon"`` uses public web access
+                without sign-in and only supports reads.
+            access: One of ``"full_control"``, ``"read_only"``. Anonymous
+                access is always read-only.
             spaces: Category of files to search; can be ``"drive"``,
                 ``"appDataFolder"``, and ``"photos"``. Of these, only the first
                 is general.
@@ -186,25 +195,26 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         # Ideally, these should be keyword-arguments, but to maintain backwards compatibility, we keep the existing API.
 
         super().__init__(**kwargs)
+        self._requested_access = access
         self.access = access
         self.scopes = [SCOPE_DICT[access]]
         self.spaces = spaces
         self.creds = creds
         self.drive: str | None = drive
         self.auth_kwargs = auth_kwargs or {}
-        self.connect(method=token)
-        if token == "anon":
-            self.drive = None
-        elif drive:
-            self.drive = self._resolve_drive_id(drive)
-
-        if root_file_id and root_file_id != ROOT_ID:
-            self._validate_root_file_id(root_file_id)
-
-        self.root_file_id = root_file_id or self.drive or ROOT_ID
-
-        if self._is_anonymous and changes_sync_interval is not None:
+        if token == "anon" and changes_sync_interval is not None:
             raise ValueError("Changes sync is not supported for anonymous access")
+        self.root_file_id = root_file_id or ROOT_ID
+        self._api: _DriveConnection | None = None
+        self._public: PublicDriveClient | None = None
+        self._public_root: PublicReference | None = None
+        self.connect(method=token)
+        if token != "anon":
+            if drive:
+                self.drive = self._resolve_drive_id(drive)
+            if root_file_id and root_file_id != ROOT_ID:
+                self._validate_root_file_id(root_file_id)
+            self.root_file_id = root_file_id or self.drive or ROOT_ID
 
         self._changes_sync_interval = changes_sync_interval
         self._changes_page_token: str | None = None
@@ -272,32 +282,97 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 f"root_file_id {drive_id!r} conflicts with drive {self.drive!r}"
             )
 
-    def connect(self, method: AuthMethod | None = None) -> None:
-        if method == "browser":
-            cred = self._connect_browser()
-        elif method == "cache":
-            cred = self._connect_cache()
-        elif method == "anon":
-            cred = AnonymousCredentials()
-        elif method == "service_account":
-            cred = self._connect_service_account()
-        else:
-            raise ValueError(f"Invalid connection method `{method}`.")
+    def _require_authenticated(self) -> _DriveConnection:
+        if self._api is None:
+            raise PermissionError("This operation requires authenticated Drive access")
+        return self._api
 
+    @property
+    def service(self) -> DriveResource:
+        return self._require_authenticated().service
+
+    @service.setter
+    def service(self, value: DriveResource) -> None:
+        self._require_authenticated().service = value
+
+    @property
+    def files(self) -> FilesResource:
+        return self._require_authenticated().files
+
+    @files.setter
+    def files(self, value: FilesResource) -> None:
+        self._require_authenticated().files = value
+
+    @property
+    def authed_http(self) -> AuthorizedHttp:
+        return self._require_authenticated().http
+
+    @authed_http.setter
+    def authed_http(self, value: AuthorizedHttp) -> None:
+        self._require_authenticated().http = value
+
+    def connect(self, method: AuthMethod | None = None) -> None:
+        root: PublicReference | None = None
+        public: PublicDriveClient | None = None
+        api: _DriveConnection | None = None
+        if method == "anon":
+            if self.drive is not None or self.spaces != "drive":
+                raise ValueError(
+                    "Anonymous access requires a public folder root, without drive or spaces options"
+                )
+            if getattr(self, "_changes_sync_interval", None) is not None:
+                raise ValueError("Changes sync is not supported for anonymous access")
+            if self.root_file_id == ROOT_ID:
+                raise ValueError(
+                    "Anonymous access requires root_file_id set to a public folder URL or ID"
+                )
+            root = PublicReference.from_folder(self.root_file_id)
+            previous_root = self._public_root
+            if previous_root is not None and previous_root.id == root.id:
+                root = previous_root
+            public = PublicDriveClient(root)
+        else:
+            if method == "browser":
+                cred = self._connect_browser()
+            elif method == "cache":
+                cred = self._connect_cache()
+            elif method == "service_account":
+                cred = self._connect_service_account()
+            else:
+                raise ValueError(f"Invalid connection method `{method}`.")
+            http = AuthorizedHttp(cred, http=build_http())
+            # AuthorizedHttp implements httplib2's transport interface.
+            # pyrefly: ignore [no-matching-overload]
+            service = build("drive", "v3", http=http)
+            api = _DriveConnection(service, service.files(), http)
+
+        self.close()
+        self._public = public
+        self._api = api
         self._auth_method = method
         self._is_anonymous = method == "anon"
+        self.access = "read_only" if self._is_anonymous else self._requested_access
+        if root is not None:
+            self.root_file_id = root.id
+            self._public_root = root
+        self.invalidate_cache()
+        for name in ("drives", "export_formats", "_resolved_root_id"):
+            self.__dict__.pop(name, None)
+        self._changes_page_token = None
+        self._last_sync_monotonic = None
 
-        # Own the authenticated transport explicitly. Sharing the transport
-        # keeps credential refresh and connection state in one place.
-        self.authed_http = AuthorizedHttp(
-            cred, http=build_http()
-        )  # TODO: should we make this private?
+    def close(self) -> None:
+        """Release the filesystem's HTTP connections."""
+        if self._public is not None:
+            self._public.close()
+        if self._api is not None:
+            self._api.http.http.close()
 
-        # AuthorizedHttp duck-types as httplib2.Http (this is exactly what
-        # googleapiclient passes internally), but the stubs only accept Http.
-        # pyrefly: ignore [no-matching-overload]
-        self.service = build("drive", "v3", http=self.authed_http)
-        self.files = self.service.files()
+    def _check_public_options(self, trashed: bool, fields: str | None) -> None:
+        if self._public is not None and (trashed or (fields and fields.strip())):
+            raise NotImplementedError(
+                "Anonymous access does not support trash queries or Drive API fields"
+            )
 
     @property
     def srv(self) -> DriveResource:
@@ -383,6 +458,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Returns:
             Mapping of source MIME type to its list of valid export targets.
         """
+        if self._public is not None:
+            return self._public.export_formats()
         about = (
             self.service.about()
             .get(fields="exportFormats")
@@ -429,6 +506,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             FileExistsError: If a file or folder already exists at ``path``.
         """
+        self._require_authenticated()
         parent = self._parent(path)
         if create_parents and parent:
             self.makedirs(parent, exist_ok=True)
@@ -463,6 +541,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             FileExistsError: If ``exist_ok`` is False and the directory already exists.
         """
+        self._require_authenticated()
         parts = self._path_str(path).split("/")
         path = ""
         for i, part in enumerate(parts):
@@ -482,6 +561,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             path: Path of the file or folder to delete.
             permanent: If True, permanently delete the file instead of moving to trash.
         """
+        self._require_authenticated()
         stripped_path = self._path_str(path)
         if stripped_path == "":
             raise ValueError("Cannot delete the filesystem root")
@@ -547,6 +627,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             ValueError: If ``recursive`` is False and the directory is not empty.
         """
+        self._require_authenticated()
         if recursive is False and self.isdir(path) and self.ls(path):
             raise ValueError("Attempt to delete non-empty folder")
         self._rm(path, permanent=permanent)
@@ -562,6 +643,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             ValueError: If ``path`` is not a directory or is not empty.
         """
+        self._require_authenticated()
         if not self.isdir(path):
             raise ValueError("Path is not a directory")
         self.rm(path, recursive=False, permanent=permanent)
@@ -632,6 +714,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             MultipleFilesError: If ``path1`` or the destination resolves to
                 multiple files.
         """
+        self._require_authenticated()
         source = self.info(path1)
         destination = self._path_str(path2)
 
@@ -715,6 +798,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             MultipleFilesError: If ``path1`` or the destination resolves to
                 multiple files.
         """
+        self._require_authenticated()
         if (
             isinstance(path1, list)
             or isinstance(path2, list)
@@ -738,6 +822,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         overwrite-by-trash, self-move guard) but relocates the existing resource
         instead of copying it, then repairs the affected cached listings.
         """
+        self._require_authenticated()
         source = self.info(path1)
         src_parent = self._parent(path1)
         src_name = self._basename(path1)
@@ -1096,6 +1181,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             FileNotFoundError: If ``path`` does not exist.
             MultipleFilesError: If multiple files share the same path name.
         """
+        self._check_public_options(trashed, fields)
         # A blank mask means "no extra fields".
         fields = (fields or "").strip() or None
         if fields is not None and not detail:
@@ -1176,10 +1262,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             kwargs: Additional arguments to pass to the ``files.get`` request.
 
         Returns:
-            File-info dict including ``name``, ``type``, ``size``, and Drive API fields.
+            File-info dict including ``name``, ``type``, ``size``, and available
+            Drive metadata. Public listings may report ``size=None``; open
+            file objects expose their actual readable size. Public listings do
+            not expose arbitrary Drive API fields.
         """
+        self._check_public_options(trashed, fields)
         stripped_path = self._path_str(path)
         if stripped_path == "":
+            if self._public is not None:
+                self.ls("", detail=True)
             info: FileInfo = {
                 "name": stripped_path,
                 "mimeType": DIR_MIME_TYPE,
@@ -1206,6 +1298,22 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 meta, path_prefix=self._parent(stripped_path)
             )
         return file_info
+
+    @override
+    def checksum(self, path: str) -> int:
+        if self._public is not None:
+            raise NotImplementedError(
+                "Public Drive listings do not provide content checksums"
+            )
+        return super().checksum(path)
+
+    @override
+    def ukey(self, path: str) -> str:
+        if self._public is not None:
+            raise NotImplementedError(
+                "Public Drive listings do not provide reliable content versions"
+            )
+        return super().ukey(path)
 
     @staticmethod
     def _is_google_native(mime_type: str) -> bool:
@@ -1266,11 +1374,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             f"Cannot export a {source_mime!r} file: no export formats are available."
         )
 
-    def _export_media(self, file_id: str, mime_type: str) -> bytes:
+    def _export_media(
+        self, file_id: str, mime_type: str, source_mime: str | None = None
+    ) -> bytes:
         """Stream a Google-native file's export to bytes.
 
         Will raise an error if mime_type is not supported.
         """
+        if self._public is not None:
+            if source_mime is None:
+                raise ValueError("Public exports require a source MIME type")
+            return self._public.export(file_id, source_mime, mime_type)
         request = self.files.export_media(fileId=file_id, mimeType=mime_type)
         buffer = io.BytesIO()
         downloader = MediaIoBaseDownload(buffer, request)
@@ -1302,6 +1416,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         info = self.info(path)
         source_mime = info.get("mimeType", "")
         target_mime = self._resolve_export_mime(source_mime, mime_type)
+        if self._public is not None:
+            return self._export_media(info["id"], target_mime, source_mime)
         return self._export_media(info["id"], target_mime)
 
     # ------------------------------------------------------------------
@@ -1459,6 +1575,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Returns:
             FileInfo entries for all children, in name order.
         """
+        self._check_public_options(trashed, fields)
+        if self._public is not None:
+            return self._public.list_children(file_id, path_prefix or "")
         all_files: list[FileInfo] = []
         page_token: str | None = None
 
@@ -1518,6 +1637,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Raises:
             MultipleFilesError: If several children share the name.
         """
+        if self._public is not None:
+            self._check_public_options(trashed, None)
+            prefix = path_prefix or ""
+            listing = self._list_children(parent_id, path_prefix=prefix)
+            self.dircache[prefix] = listing
+            full_name = f"{prefix}/{name}" if prefix else name
+            public_matches = [entry for entry in listing if entry["name"] == full_name]
+            if len(public_matches) > 1:
+                raise MultipleFilesError(full_name)
+            return public_matches[0] if public_matches else None
         query_parent = self._parent_query_id(parent_id)
         query = f"name = '{escape_query_str(name)}' and '{query_parent}' in parents"
         if not trashed:
@@ -1560,6 +1689,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             file_id: The ID of the file to trash or untrash.
             untrash: If True, untrash the file.
         """
+        self._require_authenticated()
         response = self.files.update(
             fileId=file_id,
             body={"trashed": not untrash},
@@ -1642,6 +1772,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Returns:
             A :class:`GoogleDriveFile` open in the requested mode.
         """
+        if mode != "rb":
+            self._require_authenticated()
         return GoogleDriveFile(
             self,
             path,

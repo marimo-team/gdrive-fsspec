@@ -11,7 +11,7 @@ class _FsspecRequired(TypedDict):
     """Fields fsspec requires on every file-info dict."""
 
     name: str
-    size: int
+    size: int | None
     type: Literal["file", "directory"]
 
 

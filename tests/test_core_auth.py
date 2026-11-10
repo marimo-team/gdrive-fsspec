@@ -4,20 +4,17 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import pytest
+from conftest import make_api_fs
 from googleapiclient.errors import HttpError
 
 from gdrive_fsspec._constants import ROOT_ID
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
-def test_anon_clears_drive() -> None:
-    fs = GoogleDriveFileSystem(
-        token="anon",
-        drive="would-resolve",
-        skip_instance_cache=True,
-    )
-
-    assert fs.drive is None
+def test_anon_rejects_drive() -> None:
+    with pytest.raises(ValueError, match="public folder root"):
+        GoogleDriveFileSystem(token="anon", root_file_id="folder-id", drive="shared")
 
 
 def test_changes_sync_baselines_token_at_construction() -> None:
@@ -162,8 +159,7 @@ def test_init_root_file_id_defaults_to_drive_or_root() -> None:
             drive="team",
             skip_instance_cache=True,
         )
-        plain = GoogleDriveFileSystem(
-            token="anon",
+        plain = make_api_fs(
             skip_instance_cache=True,
         )
 
@@ -172,7 +168,7 @@ def test_init_root_file_id_defaults_to_drive_or_root() -> None:
 
 
 def test_connect_browser_removes_cache_before_cache_connect() -> None:
-    fs = GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
+    fs = make_api_fs()
     cred = mock.Mock()
 
     with (
@@ -188,7 +184,7 @@ def test_connect_browser_removes_cache_before_cache_connect() -> None:
 
 
 def test_connect_browser_ignores_missing_cache_file() -> None:
-    fs = GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
+    fs = make_api_fs()
 
     with (
         mock.patch("gdrive_fsspec.core.os.remove", side_effect=FileNotFoundError),
@@ -250,7 +246,7 @@ def test_service_account_passes_auth_kwargs() -> None:
 
 
 def test_connect_owns_authed_http_and_shares_with_build() -> None:
-    fs = GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
+    fs = make_api_fs()
     sentinel = mock.Mock()
 
     with (
@@ -258,8 +254,9 @@ def test_connect_owns_authed_http_and_shares_with_build() -> None:
             "gdrive_fsspec.core.AuthorizedHttp", return_value=sentinel
         ) as authed,
         mock.patch("gdrive_fsspec.core.build") as build,
+        mock.patch.object(fs, "_connect_cache", return_value=mock.Mock()),
     ):
-        fs.connect(method="anon")
+        fs.connect(method="cache")
 
     # The filesystem owns its own AuthorizedHttp built from the credentials...
     authed.assert_called_once()

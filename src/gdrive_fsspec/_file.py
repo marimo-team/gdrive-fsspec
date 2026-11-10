@@ -22,6 +22,7 @@ from ._constants import (
     PathLike,
     _finfo_from_response,
 )
+from ._public import PublicRead
 from .types import FileInfo
 from .typing_utils import override
 from .utils import redact_uri
@@ -141,8 +142,10 @@ class GoogleDriveFile(AbstractBufferedFile):
         read_info: FileInfo | None = None
         read_size: int | None = None
         native_data: bytes | None = None
+        public_read: PublicRead | None = None
 
         if mode == "wb":
+            fs._require_authenticated()
             # If the path already exists, remember its id so the upload PATCHes
             # the existing file instead of creating an identically-named
             # duplicate.
@@ -168,24 +171,36 @@ class GoogleDriveFile(AbstractBufferedFile):
             source_mime = read_info.get("mimeType", "")
             if fs._is_google_native(source_mime):
                 target_mime = fs._resolve_export_mime(source_mime, export_mime_type)
-                native_data = fs._export_media(read_id, target_mime)
+                if fs._public is not None:
+                    native_data = fs._export_media(read_id, target_mime, source_mime)
+                else:
+                    native_data = fs._export_media(read_id, target_mime)
                 read_size = len(native_data)
                 # The export is fully materialized in memory, so read-ahead
                 # would only make redundant copies. Serve slices from the buffer
                 # with a no-op cache unless the caller asked for something else.
                 kwargs.setdefault("cache_type", "none")
+            elif fs._public is not None:
+                public_read = fs._public.prepare_read(read_id)
+                read_size = public_read.size
             else:
                 read_size = read_info["size"]
 
-        super().__init__(
-            fs,
-            path,
-            mode,
-            block_size,
-            autocommit=autocommit,
-            size=read_size,
-            **kwargs,
-        )
+        self._public_read = public_read
+        try:
+            super().__init__(
+                fs,
+                path,
+                mode,
+                block_size,
+                autocommit=autocommit,
+                size=read_size,
+                **kwargs,
+            )
+        except BaseException:
+            if public_read is not None:
+                public_read.close()
+            raise
 
         self._native_data: bytes | None = native_data  # Google-native files only
         # Defined unconditionally so neither is branch-conditional: _media_object
@@ -214,6 +229,8 @@ class GoogleDriveFile(AbstractBufferedFile):
             Requested byte range, or empty bytes if the range is not satisfiable.
         """
 
+        if self._public_read is not None:
+            return self._public_read.read_range(start, end)
         if self._native_data is not None:
             # Google-native files are fully materialized via files.export
             # export has no server-side byte-range support, so serve the requested slice from memory.
@@ -248,6 +265,15 @@ class GoogleDriveFile(AbstractBufferedFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
+
+    @override
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            public_read = getattr(self, "_public_read", None)
+            if public_read is not None:
+                public_read.close()
 
     def _authed_request(
         self,
