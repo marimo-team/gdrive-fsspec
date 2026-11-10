@@ -8,13 +8,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from tempfile import SpooledTemporaryFile
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 
-from ._constants import DIR_MIME_TYPE
+from ._constants import DIR_MIME_TYPE, LOGGER
 from .types import FileInfo
 from .typing_utils import override
 
@@ -48,6 +49,27 @@ _NATIVE_KINDS = {
     "drawings": "application/vnd.google-apps.drawing",
     "forms": "application/vnd.google-apps.form",
 }
+
+
+class _AnonymousAuth(AuthBase):
+    @override
+    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
+        r.headers.pop("Authorization", None)
+        return r
+
+
+class _AnonymousSession(requests.Session):
+    def __init__(self) -> None:
+        super().__init__()
+        # Explicit auth suppresses netrc lookup while retaining proxy/CA settings.
+        self.auth = _AnonymousAuth()
+
+    @override
+    def rebuild_auth(
+        self, prepared_request: requests.PreparedRequest, response: requests.Response
+    ) -> None:
+        # Requests normally reapplies netrc credentials after redirects.
+        prepared_request.headers.pop("Authorization", None)
 
 
 @dataclass(frozen=True)
@@ -167,12 +189,20 @@ class _ConfirmationParser(HTMLParser):
             self._in_form = False
 
 
-def _entry(url: str, name: str) -> tuple[PublicReference, str]:
+def _entry(url: str, name: str) -> tuple[PublicReference, str | None]:
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise OSError("Public folder contains an unsupported file link")
     if parts.hostname == "drive.google.com" and "/folders/" in parts.path:
-        return PublicReference.from_folder(url), DIR_MIME_TYPE
+        try:
+            return PublicReference.from_folder(url), DIR_MIME_TYPE
+        except ValueError as error:
+            raise OSError(f"Unsupported public folder link: {name!r}") from error
+    query = parse_qs(parts.query)
+    if parts.hostname == "drive.google.com" and parts.path == "/open":
+        file_id = query.get("id", [""])[0]
+        if _ID.fullmatch(file_id):
+            return PublicReference(file_id, query.get("resourcekey", [None])[0]), None
     match = re.fullmatch(
         r"/(file|document|spreadsheets|presentation|drawings|forms)/d/(?:e/)?([A-Za-z0-9_-]+)(?:/.*)?",
         parts.path,
@@ -181,7 +211,7 @@ def _entry(url: str, name: str) -> tuple[PublicReference, str]:
         raise OSError(f"Unsupported public Drive entry: {name!r}")
     key = parse_qs(parts.query).get("resourcekey", [None])[0]
     kind = match[1]
-    mime = "application/octet-stream" if kind == "file" else _NATIVE_KINDS[kind]
+    mime = None if kind == "file" else _NATIVE_KINDS[kind]
     return PublicReference(match[2], key), mime
 
 
@@ -199,9 +229,7 @@ def _check_status(response: requests.Response) -> None:
 class PublicDriveClient:
     def __init__(self, root: PublicReference) -> None:
         self._references = {root.id: root}
-        self._session = requests.Session()
-        # Anonymous mode must not pick up netrc credentials or browser cookies.
-        self._session.trust_env = False
+        self._session = _AnonymousSession()
         self._session.headers.update(
             {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"}
         )
@@ -232,31 +260,57 @@ class PublicDriveClient:
         entries: list[FileInfo] = []
         seen: set[str] = set()
         for url, name in parser.links:
-            ref, mime = _entry(url, name)
+            if not name or "/" in name or name in {".", ".."}:
+                LOGGER.warning(
+                    "Skipping public Drive entry with an unsupported path name: %r",
+                    name,
+                )
+                continue
+            try:
+                ref, mime = _entry(url, name)
+            except OSError as error:
+                LOGGER.warning(
+                    "Skipping unsupported public Drive entry %r: %s", name, error
+                )
+                continue
             if ref.id in seen:
                 continue
-            if not name or "/" in name or name in {".", ".."}:
-                raise OSError(
-                    f"Public Drive name cannot be represented as a path: {name!r}"
-                )
             self._references[ref.id] = ref
             seen.add(ref.id)
             is_folder = mime == DIR_MIME_TYPE
-            entries.append(
-                {
-                    "id": ref.id,
-                    "name": f"{prefix}/{name}" if prefix else name,
-                    "type": "directory" if is_folder else "file",
-                    "size": 0 if is_folder else None,
-                    "mimeType": mime,
-                }
-            )
+            entry: FileInfo = {
+                "id": ref.id,
+                "name": f"{prefix}/{name}" if prefix else name,
+                "type": "directory" if is_folder else "file",
+                "size": 0 if is_folder else None,
+            }
+            if mime is not None:
+                entry["mimeType"] = mime
+            entries.append(entry)
         return sorted(entries, key=lambda entry: entry["name"])
 
     @contextmanager
     def _download(
-        self, file_id: str, headers: dict[str, str] | None = None
+        self,
+        file_id: str,
+        headers: dict[str, str] | None = None,
+        *,
+        resolved_url: str | None = None,
     ) -> Iterator[requests.Response]:
+        if resolved_url is not None:
+            response = self._session.get(
+                resolved_url, headers=headers, stream=True, timeout=30
+            )
+            try:
+                if (
+                    response.status_code == 206
+                    and "attachment"
+                    in response.headers.get("Content-Disposition", "").lower()
+                ):
+                    yield response
+                    return
+            finally:
+                response.close()
         ref = self._references.get(file_id, PublicReference(file_id))
         url = "https://drive.google.com/uc?" + urlencode(
             {**ref.query(), "export": "download"}
@@ -287,7 +341,12 @@ class PublicDriveClient:
                     raise PermissionError(
                         "Drive did not return a downloadable file; check sharing, download restrictions, and quota"
                     )
-                url = action + "?" + urlencode({**parser.fields, **ref.query()})
+                params = {
+                    **dict(parse_qsl(parts.query)),
+                    **parser.fields,
+                    **ref.query(),
+                }
+                url = parts._replace(query=urlencode(params), fragment="").geturl()
             finally:
                 response.close()
         raise OSError("Drive download confirmation did not resolve")
@@ -306,7 +365,13 @@ class PublicDriveClient:
                     raise OSError("Drive returned an invalid byte range")
                 if len(response.raw.read(2, decode_content=True)) != 1:
                     raise OSError("Drive returned an incomplete byte range")
-                return PublicRead(self, file_id, int(match[3]), _validator(response))
+                return PublicRead(
+                    self,
+                    file_id,
+                    int(match[3]),
+                    _validator(response),
+                    resolved_url=response.url,
+                )
             if response.status_code == 416:
                 return self._prepare_empty(file_id)
             snapshot = SpooledTemporaryFile(max_size=8 * _CHUNK_SIZE, mode="w+b")  # noqa: SIM115 - ownership transfers to PublicRead
@@ -327,12 +392,18 @@ class PublicDriveClient:
         return PublicRead(self, file_id, 0)
 
     def read_range(
-        self, file_id: str, start: int, end: int, size: int, validator: str | None
-    ) -> bytes:
+        self,
+        file_id: str,
+        start: int,
+        end: int,
+        size: int,
+        validator: str | None,
+        resolved_url: str | None = None,
+    ) -> tuple[bytes, str]:
         headers = {"Range": f"bytes={start}-{end - 1}"}
         if validator is not None:
             headers["If-Range"] = validator
-        with self._download(file_id, headers) as response:
+        with self._download(file_id, headers, resolved_url=resolved_url) as response:
             expected = f"bytes {start}-{end - 1}/{size}"
             if (
                 response.status_code != 206
@@ -346,7 +417,7 @@ class PublicDriveClient:
             data = response.raw.read(end - start + 1, decode_content=True)
             if len(data) != end - start:
                 raise OSError("Drive returned an incomplete byte range")
-            return data
+            return data, response.url
 
     def export(self, file_id: str, source_mime: str, target_mime: str) -> bytes:
         kind, formats = _EXPORTS[source_mime]
@@ -382,6 +453,7 @@ class PublicRead:
     size: int
     validator: str | None = None
     snapshot: SpooledTemporaryFile[bytes] | None = None
+    resolved_url: str | None = None
 
     def read_range(self, start: int | None, end: int | None) -> bytes:
         first = start or 0
@@ -391,9 +463,10 @@ class PublicRead:
         if self.snapshot is not None:
             self.snapshot.seek(first)
             return self.snapshot.read(last - first)
-        return self.client.read_range(
-            self.file_id, first, last, self.size, self.validator
+        data, self.resolved_url = self.client.read_range(
+            self.file_id, first, last, self.size, self.validator, self.resolved_url
         )
+        return data
 
     def close(self) -> None:
         if self.snapshot is not None:

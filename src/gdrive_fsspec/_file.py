@@ -129,8 +129,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             **kwargs: Passed to :class:`AbstractBufferedFile`.
 
         Raises:
-            IsADirectoryError: If ``mode`` is ``"wb"`` and ``path`` is an
-                existing directory.
+            IsADirectoryError: If ``path`` is a directory.
             MultipleFilesError: If ``path`` already resolves to multiple files.
             ValueError: If ``path`` is a Google-native file with no available
                 export format (or an unsupported ``export_mime_type``).
@@ -167,6 +166,8 @@ class GoogleDriveFile(AbstractBufferedFile):
             # so materialize them now via files.export and serve reads from the
             # in-memory buffer.
             read_info = fs.info(path)
+            if read_info["type"] == "directory":
+                raise IsADirectoryError(path)
             read_id = read_info["id"]
             source_mime = read_info.get("mimeType", "")
             if fs._is_google_native(source_mime):

@@ -13,6 +13,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    cast,
     overload,
 )
 
@@ -200,7 +201,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.scopes = [SCOPE_DICT[access]]
         self.spaces = spaces
         self.creds = creds
-        self.drive: str | None = drive
+        self.drive: str | None = drive or None
         self.auth_kwargs = auth_kwargs or {}
         if token == "anon" and changes_sync_interval is not None:
             raise ValueError("Changes sync is not supported for anonymous access")
@@ -316,7 +317,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         public: PublicDriveClient | None = None
         api: _DriveConnection | None = None
         if method == "anon":
-            if self.drive is not None or self.spaces != "drive":
+            if self.drive or self.spaces != "drive":
                 raise ValueError(
                     "Anonymous access requires a public folder root, without drive or spaces options"
                 )
@@ -1300,6 +1301,31 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         return file_info
 
     @override
+    def du(
+        self,
+        path: PathLike,
+        total: bool = True,
+        maxdepth: int | None = None,
+        withdirs: bool = False,
+        **kwargs: Any,
+    ) -> int | dict[str, int]:
+        """Return disk usage for authenticated access.
+
+        Public listings have unknown sizes; use an open file's ``size`` for
+        its downloaded or exported byte length.
+        """
+        if self._public is not None:
+            raise NotImplementedError(
+                "Public Drive listings do not provide sizes for disk-usage queries"
+            )
+        return cast(
+            int | dict[str, int],
+            super().du(
+                path, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs
+            ),
+        )
+
+    @override
     def checksum(self, path: str) -> int:
         if self._public is not None:
             raise NotImplementedError(
@@ -1309,6 +1335,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @override
     def ukey(self, path: str) -> str:
+        """Return a content version key for authenticated access.
+
+        Public mode supports ``simplecache``; ``filecache`` and ``blockcache``
+        require version keys and are not supported.
+        """
         if self._public is not None:
             raise NotImplementedError(
                 "Public Drive listings do not provide reliable content versions"

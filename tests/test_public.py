@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from io import BytesIO
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
@@ -212,11 +213,18 @@ def test_listing_http_errors(
     ],
 )
 def test_unrepresentable_entries_are_not_silently_dropped(
-    public_fs: GoogleDriveFileSystem, name: str, url: str
+    public_fs: GoogleDriveFileSystem,
+    name: str,
+    url: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    serve(public_fs, folder((name, url)))
-    with pytest.raises(OSError):
-        public_fs.ls("")
+    serve(
+        public_fs,
+        folder((name, url), ("ok", "https://drive.google.com/file/d/ok/view")),
+    )
+    assert public_fs.ls("") == ["ok"]
+    assert public_fs.info("ok")["id"] == "ok"
+    assert "Skipping" in caplog.text
 
 
 def test_binary_read_seek_and_close(public_fs: GoogleDriveFileSystem) -> None:
@@ -226,6 +234,9 @@ def test_binary_read_seek_and_close(public_fs: GoogleDriveFileSystem) -> None:
         partial(b"def", 3, 5, 6),
         partial(b"ab", 0, 1, 6),
     ]
+    responses[
+        1
+    ].url = "https://drive.usercontent.google.com/download?id=file&resourcekey=key"
     get = serve(public_fs, *responses)
     with public_fs.open("file", "rb", cache_type="none") as opened:
         assert opened.size == 6
@@ -282,7 +293,7 @@ def test_invalid_initial_range(
 def test_invalid_followup_range(
     public_fs: GoogleDriveFileSystem, res: requests.Response
 ) -> None:
-    serve(public_fs, partial(b"a", 0, 0, 6), res)
+    serve(public_fs, partial(b"a", 0, 0, 6), res, attachment(b"abcdef"))
     opened = client(public_fs).prepare_read("file")
     with pytest.raises(OSError):
         opened.read_range(0, 2)
@@ -544,3 +555,130 @@ def test_invalid_anonymous_configuration(
             changes_sync_interval=sync,
             skip_instance_cache=True,
         )
+
+
+def test_proxy_and_ca_settings_do_not_enable_netrc_auth(
+    public_fs: GoogleDriveFileSystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/company-ca.pem")
+    session = client(public_fs)._session
+    settings = session.merge_environment_settings(
+        "https://drive.google.com/", {}, False, None, None
+    )
+    assert settings["proxies"]["https"] == "http://proxy.example:3128"
+    assert settings["verify"] == "/tmp/company-ca.pem"
+    with mock.patch(
+        "requests.sessions.get_netrc_auth", side_effect=AssertionError("netrc read")
+    ):
+        prepared = session.prepare_request(
+            requests.Request(
+                "GET", "https://drive.google.com/", headers={"Authorization": "private"}
+            )
+        )
+        assert "Authorization" not in prepared.headers
+        prepared.headers["Authorization"] = "private"
+        session.rebuild_auth(prepared, response())
+        assert "Authorization" not in prepared.headers
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://colab.research.google.com/drive/notebook",
+        "https://sites.google.com/view/site",
+        "https://docs.google.com/videos/d/video/edit",
+        "https://drive.google.com/drive/folders/not/a/folder",
+    ],
+)
+def test_unknown_file_types_do_not_block_supported_siblings(
+    public_fs: GoogleDriveFileSystem, url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    serve(
+        public_fs,
+        folder(("unsupported", url), ("ok", "https://drive.google.com/file/d/ok/view")),
+    )
+    assert public_fs.ls("") == ["ok"]
+    assert "Skipping" in caplog.text
+    assert "mimeType" not in public_fs.info("ok")
+
+
+def test_open_id_links_remain_listable(public_fs: GoogleDriveFileSystem) -> None:
+    serve(
+        public_fs,
+        folder(("file", "https://drive.google.com/open?id=file&resourcekey=key")),
+    )
+    assert public_fs.info("file")["id"] == "file"
+    assert client(public_fs)._references["file"].resource_key == "key"
+
+
+def test_block_reads_reuse_resolved_download_url(
+    public_fs: GoogleDriveFileSystem,
+) -> None:
+    resolved = (
+        "https://drive.usercontent.google.com/download?id=file&confirm=t&uuid=resolved"
+    )
+    initial = partial(b"a", 0, 0, 10)
+    initial.url = resolved
+    form = response(
+        b'<form id="download-form" action="https://drive.usercontent.google.com/download?route=value"><input type="hidden" name="confirm" value="t"></form>'
+    )
+    blocks = [partial(bytes([index]), index, index, 10) for index in range(5)]
+    for block in blocks:
+        block.url = resolved
+    get = serve(public_fs, form, initial, *blocks)
+    source = client(public_fs).prepare_read("file")
+    for index in range(5):
+        assert source.read_range(index, index + 1) == bytes([index])
+    assert get.call_count == 7
+    assert parse_qs(urlsplit(get.call_args_list[1].args[0]).query)["route"] == ["value"]
+    assert all(call.args[0] == resolved for call in get.call_args_list[2:])
+
+
+def test_expired_resolved_url_refreshes_once(public_fs: GoogleDriveFileSystem) -> None:
+    first = partial(b"a", 0, 0, 6)
+    first.url = "https://drive.usercontent.google.com/download?uuid=expired"
+    refreshed = partial(b"bc", 1, 2, 6)
+    refreshed.url = "https://drive.usercontent.google.com/download?uuid=fresh"
+    final = partial(b"de", 3, 4, 6)
+    get = serve(public_fs, first, response(status=403), refreshed, final)
+    source = client(public_fs).prepare_read("file")
+    assert source.read_range(1, 3) == b"bc"
+    assert source.resolved_url == refreshed.url
+    assert source.read_range(3, 5) == b"de"
+    assert get.call_args_list[1].args[0] == first.url
+    assert get.call_args_list[2].args[0].startswith("https://drive.google.com/uc?")
+    assert get.call_args_list[3].args[0] == refreshed.url
+
+
+@pytest.mark.parametrize("path", ["", "dir"])
+def test_reading_directory_fails_before_download(
+    public_fs: GoogleDriveFileSystem, path: str
+) -> None:
+    get = serve(
+        public_fs, folder(("dir", "https://drive.google.com/drive/folders/dir"))
+    )
+    with (
+        mock.patch.object(client(public_fs), "prepare_read") as prepare,
+        pytest.raises(IsADirectoryError),
+    ):
+        public_fs.open(path, "rb")
+    prepare.assert_not_called()
+    assert get.call_count == 1
+
+
+def test_public_disk_usage_has_explicit_error(public_fs: GoogleDriveFileSystem) -> None:
+    get = serve(public_fs)
+    with pytest.raises(NotImplementedError, match="disk-usage"):
+        public_fs.du("")
+    get.assert_not_called()
+
+
+def test_authenticated_disk_usage_remains_supported(
+    api_fs: GoogleDriveFileSystem,
+) -> None:
+    api_fs.dircache[""] = [{"id": "file", "name": "file", "type": "file", "size": 3}]
+    assert api_fs.du("") == 3
+    assert api_fs.du("", total=False) == {"file": 3}
