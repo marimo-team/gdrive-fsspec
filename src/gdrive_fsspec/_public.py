@@ -342,7 +342,7 @@ class PublicDriveClient:
                         "Drive did not return a downloadable file; check sharing, download restrictions, and quota"
                     )
                 params = {
-                    **dict(parse_qsl(parts.query)),
+                    **dict(parse_qsl(parts.query, keep_blank_values=True)),
                     **parser.fields,
                     **ref.query(),
                 }

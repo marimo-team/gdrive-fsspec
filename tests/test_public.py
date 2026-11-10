@@ -623,7 +623,7 @@ def test_block_reads_reuse_resolved_download_url(
     initial = partial(b"a", 0, 0, 10)
     initial.url = resolved
     form = response(
-        b'<form id="download-form" action="https://drive.usercontent.google.com/download?route=value"><input type="hidden" name="confirm" value="t"></form>'
+        b'<form id="download-form" action="https://drive.usercontent.google.com/download?route=value&amp;empty="><input type="hidden" name="confirm" value="t"></form>'
     )
     blocks = [partial(bytes([index]), index, index, 10) for index in range(5)]
     for block in blocks:
@@ -633,7 +633,11 @@ def test_block_reads_reuse_resolved_download_url(
     for index in range(5):
         assert source.read_range(index, index + 1) == bytes([index])
     assert get.call_count == 7
-    assert parse_qs(urlsplit(get.call_args_list[1].args[0]).query)["route"] == ["value"]
+    query = parse_qs(
+        urlsplit(get.call_args_list[1].args[0]).query, keep_blank_values=True
+    )
+    assert query["route"] == ["value"]
+    assert query["empty"] == [""]
     assert all(call.args[0] == resolved for call in get.call_args_list[2:])
 
 
