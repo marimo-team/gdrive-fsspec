@@ -62,9 +62,32 @@ if TYPE_CHECKING:
 
 
 class _PageListKwargs(TypedDict, total=False, closed=True):
-    """The ``list`` method doesn't enforce good type params, so we use a TypedDict to help."""
+    """Optional pagination arguments shared by Drive list methods."""
 
     pageToken: str
+
+
+class _SharedDriveKwargs(TypedDict, total=False, closed=True):
+    driveId: str
+    supportsAllDrives: bool
+
+
+class _ChangesListKwargs(TypedDict, total=False, closed=True):
+    driveId: str
+    supportsAllDrives: bool
+    includeItemsFromAllDrives: bool
+
+
+class _FilesListKwargs(TypedDict, total=False, closed=True):
+    driveId: str
+    supportsAllDrives: bool
+    includeItemsFromAllDrives: bool
+    corpora: Literal["drive"]
+
+
+class _ReparentKwargs(TypedDict, total=False, closed=True):
+    addParents: str
+    removeParents: str
 
 
 class GoogleDriveFileSystem(AbstractFileSystem):
@@ -741,7 +764,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         # the file may have. A same-parent rename touches only the name
         # and needs no parent resolution or makedirs (the parent already exists,
         # since the source lives there).
-        reparent: dict[str, Any] = {}
+        reparent: _ReparentKwargs = {}
         if dest_parent != src_parent:
             self.makedirs(dest_parent, exist_ok=True)
             reparent = {
@@ -852,7 +875,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     def _get_start_page_token(self) -> str:
         """Baseline Changes page token for this instance's corpus."""
-        kwargs: dict[str, Any] = {}
+        kwargs: _SharedDriveKwargs = {}
         if self.drive is not None:
             kwargs = {"driveId": self.drive, "supportsAllDrives": True}
         response = (
@@ -901,7 +924,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise RuntimeError("changes.list returned no newStartPageToken")
         return changes, new_start_token
 
-    def _changes_scope_kw(self) -> dict[str, Any]:
+    def _changes_scope_kw(self) -> _ChangesListKwargs:
         """Drive-scoping kwargs for ``changes.list`` (empty for My Drive).
 
         Distinct from :meth:`_drive_kw`, which emits ``corpora`` — a
@@ -1375,7 +1398,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     # (``path_prefix`` is only a naming hint for returned entries)
     # ------------------------------------------------------------------
 
-    def _drive_kw(self) -> dict[str, Any]:
+    def _drive_kw(self) -> _FilesListKwargs:
         if self.drive is not None:
             return {
                 "includeItemsFromAllDrives": True,

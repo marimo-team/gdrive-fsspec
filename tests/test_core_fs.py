@@ -1182,15 +1182,17 @@ def test_ls_from_dircache_returns_sorted_names(
     anon_fs: GoogleDriveFileSystem,
 ) -> None:
     anon_fs.dircache["parent"] = [
-        {"name": "parent/b", "size": 0, "type": "file"},
-        {"name": "parent/a", "size": 0, "type": "file"},
+        {"id": "b-id", "name": "parent/b", "size": 0, "type": "file"},
+        {"id": "a-id", "name": "parent/a", "size": 0, "type": "file"},
     ]
 
     assert anon_fs.ls("parent") == ["parent/a", "parent/b"]
 
 
 def test_ls_from_dircache_detail(anon_fs: GoogleDriveFileSystem) -> None:
-    listing: list[FileInfo] = [{"name": "parent/a", "size": 0, "type": "file"}]
+    listing: list[FileInfo] = [
+        {"id": "a-id", "name": "parent/a", "size": 0, "type": "file"}
+    ]
     anon_fs.dircache["parent"] = listing
 
     assert anon_fs.ls("parent", detail=True) == listing

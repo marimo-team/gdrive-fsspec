@@ -4,8 +4,7 @@ import logging
 import os
 import pathlib
 import ssl
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import httplib2
 
@@ -134,9 +133,7 @@ def _normalize_path(prefix: str, name: str) -> str:
     return f"/{raw_prefix}/{name}"
 
 
-def _finfo_from_response(
-    file: File | Mapping[str, Any], path_prefix: str | None = None
-) -> FileInfo:
+def _finfo_from_response(file: File, path_prefix: str | None = None) -> FileInfo:
     # strictly speaking, other types might be capable of having children,
     # such as packages
     # TODO: check specifically for links
@@ -146,8 +143,11 @@ def _finfo_from_response(
     else:
         name = file["name"]
     info: FileInfo = {
+        "id": file["id"],
         "name": name.lstrip("/"),
         "size": int(file.get("size", 0)),
         "type": file_type,
     }
-    return cast(FileInfo, {**file, **info})
+    for key, value in file.items():
+        info.setdefault(key, value)
+    return info

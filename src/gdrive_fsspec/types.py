@@ -25,7 +25,6 @@ class _Capabilities(TypedDict, total=False):
 class _DrivePartialFields(TypedDict, total=False):
     """Subset of Drive v3 ``File`` fields requested via ``FIELDS``."""
 
-    id: str
     mimeType: str
     trashed: bool
     version: str
@@ -36,7 +35,9 @@ class _DrivePartialFields(TypedDict, total=False):
 
 
 class FileInfo(_FsspecRequired, _DrivePartialFields, extra_items=Any):
-    """fsspec file-info dict: normalized path fields plus Drive API metadata."""
+    """Normalized file info with a required Drive ID and optional API metadata."""
+
+    id: str
 
 
 __all__ = ["FileInfo"]
