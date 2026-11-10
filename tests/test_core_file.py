@@ -305,12 +305,14 @@ def test_native_file_close_releases_snapshot(mocked_fs: MockedDriveFS) -> None:
     mocked_fs.files.get_media.assert_not_called()
 
 
-def test_native_export_limit_cleans_up_storage(mocked_fs: MockedDriveFS) -> None:
-    mocked_fs.fs._max_snapshot_size = 4
+def test_native_export_limit_cleans_up_storage(
+    mocked_fs: MockedDriveFS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 4)
     with SpooledTemporaryFile[bytes](mode="w+b") as buffer:
         with (
             mock.patch("gdrive_fsspec._read.SpooledTemporaryFile", return_value=buffer),
-            pytest.raises(OSError, match="max_snapshot_size=4"),
+            pytest.raises(OSError, match="too large to download in full"),
         ):
             _open_native(mocked_fs, data=b"too large")
         assert buffer.closed

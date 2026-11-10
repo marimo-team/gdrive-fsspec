@@ -71,8 +71,11 @@ def test_snapshot_spills_to_disk_and_releases_storage() -> None:
         snapshot.read()
 
 
-def test_snapshot_limit_is_checked_before_writing() -> None:
-    with ReadSnapshot(max_size=4) as snapshot:
+def test_snapshot_limit_is_checked_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 4)
+    with ReadSnapshot() as snapshot:
         snapshot.write(b"abcd")
         with pytest.raises(OSError) as error:
             snapshot.write(b"e")
@@ -82,12 +85,13 @@ def test_snapshot_limit_is_checked_before_writing() -> None:
         assert snapshot.read() == b"abcd"
 
 
-def test_snapshot_expected_size_rejects_before_reading_chunks() -> None:
+def test_snapshot_expected_size_rejects_before_reading_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 4)
     read_chunk = mock.Mock(return_value=b"large")
-    with pytest.raises(OSError, match="max_snapshot_size=4"):
-        ReadSnapshot.from_chunks(
-            (read_chunk() for _ in range(1)), max_size=4, expected_size=5
-        )
+    with pytest.raises(OSError, match="too large to download in full"):
+        ReadSnapshot.from_chunks((read_chunk() for _ in range(1)), expected_size=5)
     read_chunk.assert_not_called()
 
 
@@ -103,7 +107,11 @@ def test_snapshot_rejects_mismatched_stream_lengths(expected_size: int) -> None:
 
 
 @pytest.mark.parametrize("stream_error", [False, True])
-def test_failed_snapshot_stream_closes_storage(stream_error: bool) -> None:
+def test_failed_snapshot_stream_closes_storage(
+    stream_error: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 4)
+
     def chunks() -> Iterator[bytes]:
         yield b"abcd"
         if stream_error:
@@ -115,15 +123,16 @@ def test_failed_snapshot_stream_closes_storage(stream_error: bool) -> None:
             mock.patch("gdrive_fsspec._read.SpooledTemporaryFile", return_value=buffer),
             pytest.raises(OSError),
         ):
-            ReadSnapshot.from_chunks(chunks(), max_size=4)
+            ReadSnapshot.from_chunks(chunks())
         assert buffer.closed
 
 
-def test_snapshot_zero_limit_accepts_only_empty_content() -> None:
-    with ReadSnapshot.from_chunks([], max_size=0) as snapshot:
+def test_snapshot_zero_limit_accepts_only_empty_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 0)
+    with ReadSnapshot.from_chunks([]) as snapshot:
         assert snapshot.size == 0
         assert snapshot.read_range(0, None) == b""
-    with pytest.raises(OSError, match="max_snapshot_size=0"):
-        ReadSnapshot.from_chunks([b"x"], max_size=0)
-    with pytest.raises(ValueError, match="nonnegative"):
-        ReadSnapshot(max_size=-1)
+    with pytest.raises(OSError, match="too large to download in full"):
+        ReadSnapshot.from_chunks([b"x"])

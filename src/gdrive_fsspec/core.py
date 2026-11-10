@@ -130,7 +130,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         drive: str | None = None,
         auth_kwargs: dict[str, Any] | None = None,
         changes_sync_interval: float | None = None,
-        max_snapshot_size: int | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize a Google Drive file system.
@@ -191,19 +190,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 written may be re-listed once on the next read after a sync. If a
                 sync-enabled instance is shared across threads, a sync may
                 reconcile against a slightly stale snapshot of the cache.
-            max_snapshot_size: Maximum bytes in a local read snapshot. Applies
-                to native-document exports and public downloads without range
-                support. ``None`` (default) leaves the size unlimited. Larger
-                snapshots spill to disk after 8 MiB; the limit is enforced while
-                streaming. Range-supported binary reads are unaffected.
             **kwargs: Passed to the parent class.
         """
         # Ideally, these should be keyword-arguments, but to maintain backwards compatibility, we keep the existing API.
 
-        if max_snapshot_size is not None and max_snapshot_size < 0:
-            raise ValueError("max_snapshot_size must be nonnegative or None")
         super().__init__(**kwargs)
-        self._max_snapshot_size = max_snapshot_size
         self._requested_access = access
         self.access = access
         self.scopes = [SCOPE_DICT[access]]
@@ -337,7 +328,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             previous_root = self._public_root
             if previous_root is not None and previous_root.id == root.id:
                 root = previous_root
-            public = PublicDriveClient(root, max_snapshot_size=self._max_snapshot_size)
+            public = PublicDriveClient(root)
         else:
             if method == "browser":
                 cred = self._connect_browser()
@@ -1429,7 +1420,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     ) -> ReadSnapshot:
         if self._public is not None:
             return self._public.export_snapshot(file_id, source_mime, mime_type)
-        snapshot = ReadSnapshot(self._max_snapshot_size)
+        snapshot = ReadSnapshot()
         try:
             request = self.files.export_media(fileId=file_id, mimeType=mime_type)
             downloader = MediaIoBaseDownload(snapshot, request)

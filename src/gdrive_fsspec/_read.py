@@ -15,6 +15,7 @@ from .typing_utils import override
 
 READ_CHUNK_SIZE = 1024 * 1024
 _MEMORY_LIMIT = 8 * READ_CHUNK_SIZE
+_SNAPSHOT_LIMIT = 256 * 1024 * 1024
 
 
 class ReadSource(Protocol):
@@ -29,12 +30,9 @@ class ReadSource(Protocol):
 class ReadSnapshot(io.BufferedIOBase):
     _buffer: SpooledTemporaryFile[bytes] | None = None
 
-    def __init__(self, max_size: int | None = None) -> None:
+    def __init__(self) -> None:
         self._lock = Lock()
         super().__init__()
-        if max_size is not None and max_size < 0:
-            raise ValueError("max_snapshot_size must be nonnegative or None")
-        self._max_size = max_size
         self.size = 0
         self._buffer = SpooledTemporaryFile(max_size=_MEMORY_LIMIT, mode="w+b")  # noqa: SIM115 - owned and closed by this read source
 
@@ -43,10 +41,9 @@ class ReadSnapshot(io.BufferedIOBase):
         cls,
         chunks: Iterable[bytes],
         *,
-        max_size: int | None = None,
         expected_size: int | None = None,
     ) -> ReadSnapshot:
-        snapshot = cls(max_size)
+        snapshot = cls()
         try:
             if expected_size is not None:
                 snapshot._check_size(expected_size)
@@ -66,10 +63,10 @@ class ReadSnapshot(io.BufferedIOBase):
         return self._buffer
 
     def _check_size(self, size: int) -> None:
-        if self._max_size is not None and size > self._max_size:
+        if size > _SNAPSHOT_LIMIT:
             raise OSError(
                 errno.EFBIG,
-                f"Snapshot exceeds max_snapshot_size={self._max_size} bytes",
+                f"This file is too large to download in full (limit: {_SNAPSHOT_LIMIT / 1024**2:g} MiB)",
             )
 
     @override

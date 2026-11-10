@@ -266,10 +266,7 @@ def _check_status(response: requests.Response) -> None:
 
 
 class PublicDriveClient:
-    def __init__(
-        self, root: PublicReference, *, max_snapshot_size: int | None = None
-    ) -> None:
-        self._max_snapshot_size = max_snapshot_size
+    def __init__(self, root: PublicReference) -> None:
         self._references = {root.id: root}
         self._session = _AnonymousSession()
         self._session.headers.update(
@@ -431,7 +428,6 @@ class PublicDriveClient:
         )
         return ReadSnapshot.from_chunks(
             response.iter_content(READ_CHUNK_SIZE),
-            max_size=self._max_snapshot_size,
             expected_size=expected_size,
         )
 

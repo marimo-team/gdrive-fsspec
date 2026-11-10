@@ -371,12 +371,12 @@ def test_native_export_is_one_snapshot(public_fs: GoogleDriveFileSystem) -> None
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("known_length", [False, True])
 def test_public_snapshot_limit_applies_to_downloads_and_exports(
-    native: bool, known_length: bool
+    native: bool, known_length: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 4)
     fs = GoogleDriveFileSystem(
         token="anon",
         root_file_id="public-root",
-        max_snapshot_size=4,
         skip_instance_cache=True,
     )
     body = attachment(b"abcde")
@@ -384,7 +384,7 @@ def test_public_snapshot_limit_applies_to_downloads_and_exports(
         body.headers["Content-Length"] = "5"
     get = serve(fs, body)
     try:
-        with pytest.raises(OSError, match="max_snapshot_size=4"):
+        with pytest.raises(OSError, match="too large to download in full"):
             if native:
                 client(fs).export(
                     "doc", "application/vnd.google-apps.document", "text/plain"
@@ -399,11 +399,13 @@ def test_public_snapshot_limit_applies_to_downloads_and_exports(
         fs.close()
 
 
-def test_snapshot_limit_does_not_restrict_ranged_files() -> None:
+def test_snapshot_limit_does_not_restrict_ranged_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("gdrive_fsspec._read._SNAPSHOT_LIMIT", 0)
     fs = GoogleDriveFileSystem(
         token="anon",
         root_file_id="public-root",
-        max_snapshot_size=0,
         skip_instance_cache=True,
     )
     serve(fs, partial(b"a", 0, 0, 6), partial(b"cd", 2, 3, 6))
@@ -412,15 +414,6 @@ def test_snapshot_limit_does_not_restrict_ranged_files() -> None:
         assert source.read_range(2, 4) == b"cd"
     finally:
         fs.close()
-
-
-def test_negative_snapshot_limit_fails_before_connecting() -> None:
-    with (
-        mock.patch.object(GoogleDriveFileSystem, "connect") as connect,
-        pytest.raises(ValueError, match="max_snapshot_size"),
-    ):
-        GoogleDriveFileSystem(max_snapshot_size=-1, skip_instance_cache=True)
-    connect.assert_not_called()
 
 
 def test_native_export_format_and_denial(public_fs: GoogleDriveFileSystem) -> None:
