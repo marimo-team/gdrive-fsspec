@@ -683,9 +683,28 @@ def test_public_disk_usage_has_explicit_error(public_fs: GoogleDriveFileSystem) 
 def test_authenticated_disk_usage_remains_supported(
     api_fs: GoogleDriveFileSystem,
 ) -> None:
-    api_fs.dircache[""] = [{"id": "file", "name": "file", "type": "file", "size": 3}]
-    assert api_fs.du("") == 3
-    assert api_fs.du("", total=False) == {"file": 3}
+    api_fs.dircache[""] = [
+        {"id": "file", "name": "file", "type": "file", "size": 3},
+        {"id": "sub", "name": "sub", "type": "directory", "size": 0},
+    ]
+    api_fs.dircache["sub"] = [
+        {"id": "nested", "name": "sub/nested", "type": "file", "size": 5}
+    ]
+    assert api_fs.du("") == 8
+    assert api_fs.du("", maxdepth=1) == 3
+    assert api_fs.du("file") == 3
+    assert api_fs.du("", total=False, withdirs=True) == {
+        "": 0,
+        "file": 3,
+        "sub": 0,
+        "sub/nested": 5,
+    }
+
+
+def test_disk_usage_rejects_unknown_sizes(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.dircache[""] = [{"id": "file", "name": "file", "type": "file", "size": None}]
+    with pytest.raises(ValueError, match="File size is unknown: 'file'"):
+        api_fs.du("")
 
 
 @pytest.mark.parametrize(

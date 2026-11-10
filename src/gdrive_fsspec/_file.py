@@ -104,6 +104,7 @@ def _parse_range_end(range_header: str | None) -> int | None:
 
 class GoogleDriveFile(AbstractBufferedFile):
     fs: GoogleDriveFileSystem
+    _public_read: PublicRead | None = None
 
     def __init__(
         self,
@@ -272,7 +273,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         try:
             super().close()
         finally:
-            public_read = getattr(self, "_public_read", None)
+            public_read = self._public_read
             if public_read is not None:
                 public_read.close()
 

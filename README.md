@@ -106,7 +106,7 @@ See the ``GoogleDriveFileSystem`` docstring for `root_file_id`, `access`, `space
 
 ## Google-native files (Docs, Sheets, Slides)
 
-Google Workspace files have no binary content and cannot be downloaded directly; they must be *exported* to another format. `gdrive-fsspec` does this transparently: opening one for reading exports it to a sensible default format (Docs → `text/plain`, Sheets → `xlsx`, Slides/Drawings → PDF).
+Google Workspace files have no binary content and cannot be downloaded directly; they must be *exported* to another format. `gdrive-fsspec` does this transparently: opening one for reading exports it to a sensible default format (Docs → `text/plain`, Sheets → `xlsx`, Slides → PDF, Drawings → PNG).
 
 ```python
 # Reads the doc's text via an automatic export.

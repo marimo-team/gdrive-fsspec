@@ -72,7 +72,7 @@ _DOCUMENT_TYPES: dict[str, _DocumentType] = {
         "application/vnd.google-apps.drawing",
         {
             "application/pdf": "pdf",
-            "image/jpeg": "jpeg",
+            "image/jpeg": "jpeg",  # Public route token, not the .jpg extension.
             "image/png": "png",
             "image/svg+xml": "svg",
         },
@@ -80,7 +80,7 @@ _DOCUMENT_TYPES: dict[str, _DocumentType] = {
     ),
     "forms": _DocumentType("application/vnd.google-apps.form", {}),
 }
-_EXPORTS_BY_MIME = {
+_EXPORTS_BY_MIME: dict[str, tuple[str, _DocumentType]] = {
     document.mime_type: (kind, document)
     for kind, document in _DOCUMENT_TYPES.items()
     if document.formats
@@ -243,12 +243,14 @@ def _entry(url: str, name: str) -> tuple[PublicReference, str | None]:
         r"/([a-z]+)/d/(?:e/)?([A-Za-z0-9_-]+)(?:/.*)?",
         parts.path,
     )
-    if match is None or parts.hostname not in {"drive.google.com", "docs.google.com"}:
+    if (
+        match is None
+        or parts.hostname not in {"drive.google.com", "docs.google.com"}
+        or (match[1] != "file" and match[1] not in _DOCUMENT_TYPES)
+    ):
         raise OSError(f"Unsupported public Drive entry: {name!r}")
     key = parse_qs(parts.query).get("resourcekey", [None])[0]
     kind = match[1]
-    if kind != "file" and kind not in _DOCUMENT_TYPES:
-        raise OSError(f"Unsupported public Drive entry: {name!r}")
     mime = None if kind == "file" else _DOCUMENT_TYPES[kind].mime_type
     return PublicReference(match[2], key), mime
 

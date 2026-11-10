@@ -13,7 +13,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    cast,
     overload,
 )
 
@@ -209,6 +208,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self._api: _DriveConnection | None = None
         self._public: PublicDriveClient | None = None
         self._public_root: PublicReference | None = None
+        self._changes_sync_interval = changes_sync_interval
+        self._changes_page_token: str | None = None
+        self._last_sync_monotonic: float | None = None
         self.connect(method=token)
         if token != "anon":
             if drive:
@@ -217,9 +219,6 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 self._validate_root_file_id(root_file_id)
             self.root_file_id = root_file_id or self.drive or ROOT_ID
 
-        self._changes_sync_interval = changes_sync_interval
-        self._changes_page_token: str | None = None
-        self._last_sync_monotonic: float | None = None
         if self._changes_sync_interval is not None:
             # Baseline the changes token eagerly so the first cached read can already reconcile.
             try:
@@ -321,7 +320,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 raise ValueError(
                     "Anonymous access requires a public folder root, without drive or spaces options"
                 )
-            if getattr(self, "_changes_sync_interval", None) is not None:
+            if self._changes_sync_interval is not None:
                 raise ValueError("Changes sync is not supported for anonymous access")
             if self.root_file_id == ROOT_ID:
                 raise ValueError(
@@ -1308,7 +1307,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         total: bool = True,
         maxdepth: int | None = None,
         withdirs: bool = False,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> int | dict[str, int]:
         """Return disk usage for authenticated access.
 
@@ -1319,12 +1318,24 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise NotImplementedError(
                 "Public Drive listings do not provide sizes for disk-usage queries"
             )
-        return cast(
-            int | dict[str, int],
-            super().du(
-                path, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs
-            ),
-        )
+        sizes: dict[str, int] = {}
+
+        def add_size(entry_path: PathLike) -> None:
+            info = self.info(entry_path)
+            size = info["size"]
+            if size is None:
+                raise ValueError(f"File size is unknown: {info['name']!r}")
+            sizes[info["name"]] = size
+
+        if withdirs and self.isdir(path):
+            add_size(path)
+        for entry_path in self.find(
+            path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
+        ):
+            if not isinstance(entry_path, str):
+                raise TypeError("Expected a filesystem path from find()")
+            add_size(entry_path)
+        return sum(sizes.values()) if total else sizes
 
     @override
     def checksum(self, path: str) -> int:
