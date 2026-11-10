@@ -2,6 +2,8 @@
 
 import io
 import json
+from collections.abc import Callable
+from tempfile import SpooledTemporaryFile
 from typing import Any
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -16,6 +18,7 @@ from gdrive_fsspec._file import (
     _parse_range_end,
     _with_supports_all_drives,
 )
+from gdrive_fsspec._read import ReadSnapshot
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
@@ -172,13 +175,15 @@ def test_fetch_range_propagates_other_http_errors(
 DOC_MIME = "application/vnd.google-apps.document"
 
 
-def _fake_downloader(data: bytes) -> Any:
+def _fake_downloader(
+    data: bytes,
+) -> Callable[[ReadSnapshot, object, int], mock.Mock]:
     """A ``MediaIoBaseDownload`` replacement that writes ``data`` in one chunk."""
 
-    def factory(buffer: io.BytesIO, request: Any) -> mock.Mock:
+    def factory(buffer: ReadSnapshot, request: object, chunksize: int) -> mock.Mock:
         downloader = mock.Mock()
 
-        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
+        def next_chunk(**_kwargs: object) -> tuple[mock.Mock, bool]:
             buffer.write(data)
             return mock.Mock(), True
 
@@ -282,6 +287,30 @@ def test_native_file_respects_explicit_cache_type(mocked_fs: MockedDriveFS) -> N
     assert file.cache.name == "readahead"
     assert file.read(4) == b"abcd"
     assert file.read() == b"efghij"
+
+
+def test_native_file_close_releases_snapshot(mocked_fs: MockedDriveFS) -> None:
+    file = _open_native(mocked_fs, data=b"exported data", cache_type="readahead")
+    source = file._read_source
+    assert isinstance(source, ReadSnapshot)
+    buffer = source._buffer
+    assert buffer is not None
+    assert file.read(1) == b"e"
+    file.close()
+    assert source.closed and buffer.closed
+    assert file._read_source is None
+    assert file.cache is None
+
+
+def test_native_export_limit_cleans_up_storage(mocked_fs: MockedDriveFS) -> None:
+    mocked_fs.fs._max_snapshot_size = 4
+    with SpooledTemporaryFile[bytes](mode="w+b") as buffer:
+        with (
+            mock.patch("gdrive_fsspec._read.SpooledTemporaryFile", return_value=buffer),
+            pytest.raises(OSError, match="max_snapshot_size=4"),
+        ):
+            _open_native(mocked_fs, data=b"too large")
+        assert buffer.closed
 
 
 def test_native_file_honors_explicit_export_mime(mocked_fs: MockedDriveFS) -> None:

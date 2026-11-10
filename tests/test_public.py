@@ -14,7 +14,8 @@ from urllib3.response import HTTPResponse
 
 from gdrive_fsspec import GoogleDriveFileSystem
 from gdrive_fsspec._constants import MultipleFilesError
-from gdrive_fsspec._public import PublicDriveClient, PublicReference
+from gdrive_fsspec._public import PublicDriveClient, PublicRead, PublicReference
+from gdrive_fsspec._read import ReadSnapshot
 
 
 def response(
@@ -255,15 +256,14 @@ def test_ignored_initial_range_uses_one_local_snapshot(
 ) -> None:
     get = serve(public_fs, attachment(b"abcdef"))
     opened = client(public_fs).prepare_read("file")
-    snapshot = opened.snapshot
-    assert snapshot is not None
+    assert isinstance(opened, ReadSnapshot)
     try:
         assert opened.read_range(3, 6) == b"def"
         assert opened.read_range(0, 2) == b"ab"
         assert get.call_count == 1
     finally:
         opened.close()
-    assert snapshot.closed
+    assert opened.closed
 
 
 @pytest.mark.parametrize(
@@ -365,6 +365,62 @@ def test_native_export_is_one_snapshot(public_fs: GoogleDriveFileSystem) -> None
         assert opened.read() == b"exported xlsx"
     assert get.call_count == 2
     assert get.call_args.kwargs["params"] == {"format": "xlsx", "resourcekey": "key"}
+    assert get.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("known_length", [False, True])
+def test_public_snapshot_limit_applies_to_downloads_and_exports(
+    native: bool, known_length: bool
+) -> None:
+    fs = GoogleDriveFileSystem(
+        token="anon",
+        root_file_id="public-root",
+        max_snapshot_size=4,
+        skip_instance_cache=True,
+    )
+    body = attachment(b"abcde")
+    if known_length:
+        body.headers["Content-Length"] = "5"
+    get = serve(fs, body)
+    try:
+        with pytest.raises(OSError, match="max_snapshot_size=4"):
+            if native:
+                client(fs).export(
+                    "doc", "application/vnd.google-apps.document", "text/plain"
+                )
+            else:
+                client(fs).prepare_read("file")
+        assert body.raw.closed
+        assert get.call_args.kwargs["stream"] is True
+        if known_length:
+            assert body.raw.tell() == 0
+    finally:
+        fs.close()
+
+
+def test_snapshot_limit_does_not_restrict_ranged_files() -> None:
+    fs = GoogleDriveFileSystem(
+        token="anon",
+        root_file_id="public-root",
+        max_snapshot_size=0,
+        skip_instance_cache=True,
+    )
+    serve(fs, partial(b"a", 0, 0, 6), partial(b"cd", 2, 3, 6))
+    try:
+        source = client(fs).prepare_read("file")
+        assert source.read_range(2, 4) == b"cd"
+    finally:
+        fs.close()
+
+
+def test_negative_snapshot_limit_fails_before_connecting() -> None:
+    with (
+        mock.patch.object(GoogleDriveFileSystem, "connect") as connect,
+        pytest.raises(ValueError, match="max_snapshot_size"),
+    ):
+        GoogleDriveFileSystem(max_snapshot_size=-1, skip_instance_cache=True)
+    connect.assert_not_called()
 
 
 def test_native_export_format_and_denial(public_fs: GoogleDriveFileSystem) -> None:
@@ -486,7 +542,7 @@ def test_failed_file_initialization_closes_download_snapshot(
 ) -> None:
     serve(public_fs, attachment(b"downloaded file"))
     source = client(public_fs).prepare_read("file")
-    assert source.snapshot is not None
+    assert isinstance(source, ReadSnapshot)
     serve(public_fs, folder(("file", "https://drive.google.com/file/d/file/view")))
     with (
         mock.patch.object(client(public_fs), "prepare_read", return_value=source),
@@ -494,7 +550,7 @@ def test_failed_file_initialization_closes_download_snapshot(
     ):
         public_fs.open("file", "rb", cache_type="invalid-cache")
     assert error.value.__traceback__ is not None
-    assert source.snapshot.closed
+    assert source.closed
 
 
 @pytest.mark.parametrize(
@@ -650,6 +706,7 @@ def test_expired_resolved_url_refreshes_once(public_fs: GoogleDriveFileSystem) -
     get = serve(public_fs, first, response(status=403), refreshed, final)
     source = client(public_fs).prepare_read("file")
     assert source.read_range(1, 3) == b"bc"
+    assert isinstance(source, PublicRead)
     assert source.resolved_url == refreshed.url
     assert source.read_range(3, 5) == b"de"
     assert get.call_args_list[1].args[0] == first.url

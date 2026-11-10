@@ -7,7 +7,6 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from tempfile import SpooledTemporaryFile
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit
 
 import requests
@@ -16,12 +15,12 @@ from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 
 from ._constants import DIR_MIME_TYPE, LOGGER
+from ._read import READ_CHUNK_SIZE, ReadSnapshot
 from .types import FileInfo
 from .typing_utils import override
 
 _ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 _CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)\Z")
-_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -267,7 +266,10 @@ def _check_status(response: requests.Response) -> None:
 
 
 class PublicDriveClient:
-    def __init__(self, root: PublicReference) -> None:
+    def __init__(
+        self, root: PublicReference, *, max_snapshot_size: int | None = None
+    ) -> None:
+        self._max_snapshot_size = max_snapshot_size
         self._references = {root.id: root}
         self._session = _AnonymousSession()
         self._session.headers.update(
@@ -394,7 +396,7 @@ class PublicDriveClient:
                 response.close()
         raise OSError("Drive download confirmation did not resolve")
 
-    def prepare_read(self, file_id: str) -> PublicRead:
+    def prepare_read(self, file_id: str) -> PublicRead | ReadSnapshot:
         with self._download(file_id, {"Range": "bytes=0-0"}) as response:
             if response.status_code == 206:
                 match = _CONTENT_RANGE.fullmatch(
@@ -417,16 +419,21 @@ class PublicDriveClient:
                 )
             if response.status_code == 416:
                 return self._prepare_empty(file_id)
-            snapshot = SpooledTemporaryFile(max_size=8 * _CHUNK_SIZE, mode="w+b")  # noqa: SIM115 - ownership transfers to PublicRead
-            try:
-                for chunk in response.iter_content(_CHUNK_SIZE):
-                    snapshot.write(chunk)
-                size = snapshot.tell()
-                snapshot.seek(0)
-                return PublicRead(self, file_id, size, snapshot=snapshot)
-            except BaseException:
-                snapshot.close()
-                raise
+            return self._snapshot_response(response)
+
+    def _snapshot_response(self, response: requests.Response) -> ReadSnapshot:
+        length = response.headers.get("Content-Length", "")
+        size_hint = (
+            int(length)
+            if length.isdecimal()
+            and response.headers.get("Content-Encoding", "identity") == "identity"
+            else None
+        )
+        return ReadSnapshot.from_chunks(
+            response.iter_content(READ_CHUNK_SIZE),
+            max_size=self._max_snapshot_size,
+            size_hint=size_hint,
+        )
 
     def _prepare_empty(self, file_id: str) -> PublicRead:
         with self._download(file_id) as response:
@@ -463,6 +470,12 @@ class PublicDriveClient:
             return data, response.url
 
     def export(self, file_id: str, source_mime: str, target_mime: str) -> bytes:
+        with self.export_snapshot(file_id, source_mime, target_mime) as snapshot:
+            return snapshot.read()
+
+    def export_snapshot(
+        self, file_id: str, source_mime: str, target_mime: str
+    ) -> ReadSnapshot:
         kind, document = _EXPORTS_BY_MIME[source_mime]
         ref = self._references.get(file_id, PublicReference(file_id))
         export_format = document.formats[target_mime]
@@ -477,6 +490,7 @@ class PublicDriveClient:
         with self._session.get(
             url,
             params=params,
+            stream=True,
             timeout=30,
         ) as response:
             _check_status(response)
@@ -485,7 +499,7 @@ class PublicDriveClient:
                 not in response.headers.get("Content-Disposition", "").lower()
             ):
                 raise PermissionError("Drive did not return an exported document")
-            return response.content
+            return self._snapshot_response(response)
 
 
 def _validator(response: requests.Response) -> str | None:
@@ -501,7 +515,6 @@ class PublicRead:
     file_id: str
     size: int
     validator: str | None = None
-    snapshot: SpooledTemporaryFile[bytes] | None = None
     resolved_url: str | None = None
 
     def read_range(self, start: int | None, end: int | None) -> bytes:
@@ -509,14 +522,10 @@ class PublicRead:
         last = min(end if end is not None else self.size, self.size)
         if first >= last:
             return b""
-        if self.snapshot is not None:
-            self.snapshot.seek(first)
-            return self.snapshot.read(last - first)
         data, self.resolved_url = self.client.read_range(
             self.file_id, first, last, self.size, self.validator, self.resolved_url
         )
         return data
 
     def close(self) -> None:
-        if self.snapshot is not None:
-            self.snapshot.close()
+        pass

@@ -6,7 +6,7 @@ from zipfile import ZipFile
 
 import pytest
 from export_validation import (
-    VALIDATED_EXPORT_MIME_TYPES,
+    EXPORT_VALIDATORS,
     configured_export_setting,
     validate_export,
 )
@@ -16,7 +16,7 @@ from gdrive_fsspec._public import PublicDriveClient
 
 def test_every_public_export_format_has_a_content_validator() -> None:
     for targets in PublicDriveClient.export_formats().values():
-        assert set(targets) <= VALIDATED_EXPORT_MIME_TYPES
+        assert set(targets) <= EXPORT_VALIDATORS.keys()
 
 
 def test_public_export_formats_are_in_the_api_snapshot() -> None:
@@ -100,9 +100,21 @@ def test_html_export_rejects_plain_text() -> None:
         validate_export(b"not an HTML export", "text/html")
 
 
-def test_new_formats_need_a_content_validator() -> None:
+def test_new_formats_need_a_registered_content_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = b"some content"
+    mime_type = "application/new-format"
     with pytest.raises(AssertionError, match="No content validator"):
-        validate_export(b"some content", "application/new-format")
+        validate_export(data, mime_type)
+    validated: list[bytes] = []
+
+    def validate_registered(content: bytes) -> None:
+        validated.append(content)
+
+    monkeypatch.setitem(EXPORT_VALIDATORS, mime_type, validate_registered)
+    validate_export(data, mime_type)
+    assert validated == [data]
 
 
 def test_scheduled_export_checks_require_configuration(
