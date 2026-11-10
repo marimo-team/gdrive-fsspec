@@ -453,8 +453,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         Maps each Google-native MIME type (e.g.
         ``application/vnd.google-apps.document``) to the list of target MIME
-        types it can be exported to. Fetched once from the Drive ``about``
-        resource and cached for the lifetime of the filesystem.
+        types it can be exported to. Authenticated access fetches these from
+        Drive's ``about`` resource; public access uses the public export catalog.
+        Cached for the lifetime of the filesystem.
 
         Returns:
             Mapping of source MIME type to its list of valid export targets.

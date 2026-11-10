@@ -464,13 +464,13 @@ def test_unsupported_native_files_remain_listable(
     serve(
         public_fs,
         folder(
-            ("drawing", "https://docs.google.com/drawings/d/drawing/edit"),
+            ("form", "https://docs.google.com/forms/d/form/edit"),
             ("file", "https://drive.google.com/file/d/file/view"),
         ),
     )
-    assert public_fs.ls("") == ["drawing", "file"]
+    assert public_fs.ls("") == ["file", "form"]
     with pytest.raises(ValueError, match="no export formats"):
-        public_fs.open("drawing", "rb")
+        public_fs.open("form", "rb")
 
 
 def test_initial_range_must_have_positive_total(
@@ -686,3 +686,121 @@ def test_authenticated_disk_usage_remains_supported(
     api_fs.dircache[""] = [{"id": "file", "name": "file", "type": "file", "size": 3}]
     assert api_fs.du("") == 3
     assert api_fs.du("", total=False) == {"file": 3}
+
+
+@pytest.mark.parametrize(
+    "kind,source_mime,formats",
+    [
+        (
+            "document",
+            "application/vnd.google-apps.document",
+            {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+                "application/vnd.oasis.opendocument.text": "odt",
+                "application/rtf": "rtf",
+                "application/pdf": "pdf",
+                "text/plain": "txt",
+                "text/html": "html",
+                "application/zip": "zip",
+                "application/epub+zip": "epub",
+                "text/markdown": "md",
+            },
+        ),
+        (
+            "spreadsheets",
+            "application/vnd.google-apps.spreadsheet",
+            {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+                "application/vnd.oasis.opendocument.spreadsheet": "ods",
+                "application/pdf": "pdf",
+                "application/zip": "zip",
+                "text/csv": "csv",
+                "text/tab-separated-values": "tsv",
+            },
+        ),
+        (
+            "presentation",
+            "application/vnd.google-apps.presentation",
+            {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+                "application/vnd.oasis.opendocument.presentation": "odp",
+                "application/pdf": "pdf",
+                "text/plain": "txt",
+            },
+        ),
+        (
+            "drawings",
+            "application/vnd.google-apps.drawing",
+            {
+                "application/pdf": "pdf",
+                "image/jpeg": "jpeg",
+                "image/png": "png",
+                "image/svg+xml": "svg",
+            },
+        ),
+    ],
+)
+def test_published_export_formats_route_through_public_client(
+    public_fs: GoogleDriveFileSystem,
+    kind: str,
+    source_mime: str,
+    formats: dict[str, str],
+) -> None:
+    serve(
+        public_fs,
+        folder(
+            ("native", f"https://docs.google.com/{kind}/d/native/edit?resourcekey=key")
+        ),
+    )
+    assert public_fs.info("native")["mimeType"] == source_mime
+    assert set(public_fs.export_formats[source_mime]) == set(formats)
+    for target_mime, parameter in formats.items():
+        get = serve(public_fs, attachment(b"exported content"))
+        assert public_fs.export("native", target_mime) == b"exported content"
+        if kind == "drawings":
+            assert (
+                get.call_args.args[0]
+                == f"https://docs.google.com/drawings/d/native/export/{parameter}"
+            )
+            assert get.call_args.kwargs["params"] == {"resourcekey": "key"}
+        else:
+            assert (
+                get.call_args.args[0]
+                == f"https://docs.google.com/{kind}/d/native/export"
+            )
+            assert get.call_args.kwargs["params"] == {
+                "format": parameter,
+                "resourcekey": "key",
+            }
+
+
+@pytest.mark.parametrize(
+    "kind,expected_mime",
+    [
+        ("document", "text/plain"),
+        (
+            "spreadsheets",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("presentation", "application/pdf"),
+        ("drawings", "image/png"),
+    ],
+)
+def test_broader_catalog_preserves_default_preferences(
+    public_fs: GoogleDriveFileSystem, kind: str, expected_mime: str
+) -> None:
+    serve(
+        public_fs, folder(("native", f"https://docs.google.com/{kind}/d/native/edit"))
+    )
+    source = public_fs.info("native")["mimeType"]
+    assert public_fs._resolve_export_mime(source, None) == expected_mime
+
+
+def test_native_html_export_is_valid_content(public_fs: GoogleDriveFileSystem) -> None:
+    serve(
+        public_fs,
+        folder(("doc", "https://docs.google.com/document/d/doc/edit")),
+        attachment(b"<html><body>Document content</body></html>"),
+    )
+    with public_fs.open("doc", "rb", export_mime_type="text/html") as opened:
+        assert opened.read() == b"<html><body>Document content</body></html>"

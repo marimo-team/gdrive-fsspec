@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -22,32 +22,68 @@ from .typing_utils import override
 _ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 _CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)\Z")
 _CHUNK_SIZE = 1024 * 1024
-_EXPORTS: dict[str, tuple[str, dict[str, str]]] = {
-    "application/vnd.google-apps.document": (
-        "document",
-        {"text/plain": "txt", "application/pdf": "pdf"},
+
+
+@dataclass(frozen=True)
+class _DocumentType:
+    mime_type: str
+    formats: Mapping[str, str]
+    format_in_path: bool = False
+
+
+# MIME types and formats: https://developers.google.com/workspace/drive/api/guides/ref-export-formats
+# Query-style public export routes follow https://github.com/wkentaro/gdown/blob/main/gdown/download.py
+_DOCUMENT_TYPES: dict[str, _DocumentType] = {
+    "document": _DocumentType(
+        "application/vnd.google-apps.document",
+        {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+            "application/vnd.oasis.opendocument.text": "odt",
+            "application/rtf": "rtf",
+            "application/pdf": "pdf",
+            "text/plain": "txt",
+            "text/html": "html",
+            "application/zip": "zip",
+            "application/epub+zip": "epub",
+            "text/markdown": "md",
+        },
     ),
-    "application/vnd.google-apps.spreadsheet": (
-        "spreadsheets",
+    "spreadsheets": _DocumentType(
+        "application/vnd.google-apps.spreadsheet",
         {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+            "application/vnd.oasis.opendocument.spreadsheet": "ods",
+            "application/pdf": "pdf",
+            "application/zip": "zip",
             "text/csv": "csv",
+            "text/tab-separated-values": "tsv",
         },
     ),
-    "application/vnd.google-apps.presentation": (
-        "presentation",
+    "presentation": _DocumentType(
+        "application/vnd.google-apps.presentation",
+        {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+            "application/vnd.oasis.opendocument.presentation": "odp",
+            "application/pdf": "pdf",
+            "text/plain": "txt",
+        },
+    ),
+    "drawings": _DocumentType(
+        "application/vnd.google-apps.drawing",
         {
             "application/pdf": "pdf",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+            "image/jpeg": "jpeg",
+            "image/png": "png",
+            "image/svg+xml": "svg",
         },
+        format_in_path=True,
     ),
+    "forms": _DocumentType("application/vnd.google-apps.form", {}),
 }
-_NATIVE_KINDS = {
-    "document": "application/vnd.google-apps.document",
-    "spreadsheets": "application/vnd.google-apps.spreadsheet",
-    "presentation": "application/vnd.google-apps.presentation",
-    "drawings": "application/vnd.google-apps.drawing",
-    "forms": "application/vnd.google-apps.form",
+_EXPORTS_BY_MIME = {
+    document.mime_type: (kind, document)
+    for kind, document in _DOCUMENT_TYPES.items()
+    if document.formats
 }
 
 
@@ -204,14 +240,16 @@ def _entry(url: str, name: str) -> tuple[PublicReference, str | None]:
         if _ID.fullmatch(file_id):
             return PublicReference(file_id, query.get("resourcekey", [None])[0]), None
     match = re.fullmatch(
-        r"/(file|document|spreadsheets|presentation|drawings|forms)/d/(?:e/)?([A-Za-z0-9_-]+)(?:/.*)?",
+        r"/([a-z]+)/d/(?:e/)?([A-Za-z0-9_-]+)(?:/.*)?",
         parts.path,
     )
     if match is None or parts.hostname not in {"drive.google.com", "docs.google.com"}:
         raise OSError(f"Unsupported public Drive entry: {name!r}")
     key = parse_qs(parts.query).get("resourcekey", [None])[0]
     kind = match[1]
-    mime = None if kind == "file" else _NATIVE_KINDS[kind]
+    if kind != "file" and kind not in _DOCUMENT_TYPES:
+        raise OSError(f"Unsupported public Drive entry: {name!r}")
+    mime = None if kind == "file" else _DOCUMENT_TYPES[kind].mime_type
     return PublicReference(match[2], key), mime
 
 
@@ -243,7 +281,10 @@ class PublicDriveClient:
 
     @staticmethod
     def export_formats() -> dict[str, list[str]]:
-        return {mime: list(formats) for mime, (_, formats) in _EXPORTS.items()}
+        return {
+            mime: list(document.formats)
+            for mime, (_, document) in _EXPORTS_BY_MIME.items()
+        }
 
     def list_children(self, folder_id: str, prefix: str) -> list[FileInfo]:
         ref = self._references.get(folder_id, PublicReference(folder_id))
@@ -420,13 +461,19 @@ class PublicDriveClient:
             return data, response.url
 
     def export(self, file_id: str, source_mime: str, target_mime: str) -> bytes:
-        kind, formats = _EXPORTS[source_mime]
+        kind, document = _EXPORTS_BY_MIME[source_mime]
         ref = self._references.get(file_id, PublicReference(file_id))
-        params = {"format": formats[target_mime]}
+        export_format = document.formats[target_mime]
+        url = f"https://docs.google.com/{kind}/d/{file_id}/export"
+        params: dict[str, str] = {}
+        if document.format_in_path:
+            url += f"/{export_format}"
+        else:
+            params["format"] = export_format
         if ref.resource_key:
             params["resourcekey"] = ref.resource_key
         with self._session.get(
-            f"https://docs.google.com/{kind}/d/{file_id}/export",
+            url,
             params=params,
             timeout=30,
         ) as response:
