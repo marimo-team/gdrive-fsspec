@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import os
 from html.parser import HTMLParser
 from io import BytesIO, StringIO
 from xml.etree import ElementTree
 from zipfile import ZipFile
+
+import pytest
 
 from gdrive_fsspec.typing_utils import override
 
@@ -20,6 +23,34 @@ _OPEN_DOCUMENT_TYPES: set[str] = {
     "application/vnd.oasis.opendocument.spreadsheet",
     "application/vnd.oasis.opendocument.presentation",
 }
+VALIDATED_EXPORT_MIME_TYPES: frozenset[str] = (
+    frozenset(_OFFICE_PARTS)
+    | _OPEN_DOCUMENT_TYPES
+    | {
+        "application/epub+zip",
+        "application/zip",
+        "application/pdf",
+        "application/rtf",
+        "image/png",
+        "image/jpeg",
+        "image/svg+xml",
+        "text/html",
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+        "text/tab-separated-values",
+    }
+)
+
+
+def configured_export_setting(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        message = f"{name} is required for export checks"
+        if os.environ.get("GDRIVE_FSSPEC_REQUIRE_EXPORT_CHECKS") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    return value
 
 
 class _HtmlStructure(HTMLParser):
@@ -84,7 +115,10 @@ def validate_export(data: bytes, mime_type: str) -> None:
     }:
         text = data.decode("utf-8-sig")
         assert text.strip()
-        assert not text.lstrip().lower().startswith(("<!doctype html", "<html"))
+        parser = _HtmlStructure()
+        parser.feed(text)
+        parser.close()
+        assert not parser.tags & {"html", "head", "body", "table", "form"}
         if mime_type in {"text/csv", "text/tab-separated-values"}:
             delimiter = "," if mime_type == "text/csv" else "\t"
             rows = list(csv.reader(StringIO(text), delimiter=delimiter, strict=True))

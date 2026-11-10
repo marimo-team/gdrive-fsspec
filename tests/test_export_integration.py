@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
-from export_validation import validate_export
+from export_validation import configured_export_setting, validate_export
 
 from gdrive_fsspec import GoogleDriveFileSystem
 from gdrive_fsspec._public import _DOCUMENT_TYPES, PublicDriveClient, PublicReference
 
-pytestmark = pytest.mark.integration
-
-
-def _configured(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        message = f"{name} is required for export checks"
-        if os.environ.get("GDRIVE_FSSPEC_REQUIRE_EXPORT_CHECKS") == "1":
-            pytest.fail(message)
-        pytest.skip(message)
-    return value
+pytestmark = pytest.mark.drive_exports
 
 
 @pytest.mark.parametrize(
@@ -34,7 +23,7 @@ def _configured(name: str) -> str:
     ],
 )
 def test_public_export_content(kind: str, source_mime: str, target_mime: str) -> None:
-    file_id = _configured(f"GDRIVE_FSSPEC_PUBLIC_{kind.upper()}")
+    file_id = configured_export_setting(f"GDRIVE_FSSPEC_PUBLIC_{kind.upper()}")
     client = PublicDriveClient(PublicReference(file_id))
     try:
         data = client.export(file_id, source_mime, target_mime)
@@ -44,7 +33,7 @@ def test_public_export_content(kind: str, source_mime: str, target_mime: str) ->
 
 
 def test_export_catalog() -> None:
-    credentials = _configured("GDRIVE_FSSPEC_CREDENTIALS_PATH")
+    credentials = configured_export_setting("GDRIVE_FSSPEC_CREDENTIALS_PATH")
     fs = GoogleDriveFileSystem(
         token="service_account",
         creds=credentials,

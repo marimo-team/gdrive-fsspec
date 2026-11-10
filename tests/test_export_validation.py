@@ -1,10 +1,32 @@
 import csv
+import json
 from io import BytesIO
+from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
-from export_validation import validate_export
-from test_export_integration import _configured
+from export_validation import (
+    VALIDATED_EXPORT_MIME_TYPES,
+    configured_export_setting,
+    validate_export,
+)
+
+from gdrive_fsspec._public import PublicDriveClient
+
+
+def test_every_public_export_format_has_a_content_validator() -> None:
+    for targets in PublicDriveClient.export_formats().values():
+        assert set(targets) <= VALIDATED_EXPORT_MIME_TYPES
+
+
+def test_public_export_formats_are_in_the_api_snapshot() -> None:
+    path = Path(__file__).parent / "fixtures" / "drive_export_formats.json"
+    baseline: object = json.loads(path.read_text())
+    assert isinstance(baseline, dict)
+    for source, targets in PublicDriveClient.export_formats().items():
+        api_targets: object = baseline[source]
+        assert isinstance(api_targets, list)
+        assert all(target in api_targets for target in targets)
 
 
 def test_office_export_requires_the_correct_document_parts() -> None:
@@ -44,9 +66,17 @@ def test_export_rejects_incomplete_or_wrong_content(
     "mime_type",
     ["text/plain", "text/markdown", "text/csv", "text/tab-separated-values"],
 )
-def test_text_export_rejects_login_html(mime_type: str) -> None:
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"<!DOCTYPE html><html>Sign in</html>",
+        b"<head><title>Error 400</title></head>",
+        b"<!-- comment --><html>Sign in</html>",
+    ],
+)
+def test_text_export_rejects_html_markup(mime_type: str, data: bytes) -> None:
     with pytest.raises(AssertionError):
-        validate_export(b"<!DOCTYPE html><html>Sign in</html>", mime_type)
+        validate_export(data, mime_type)
 
 
 def test_csv_export_checks_rows_after_the_first() -> None:
@@ -82,7 +112,7 @@ def test_scheduled_export_checks_require_configuration(
     monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GDRIVE_FSSPEC_REQUIRE_EXPORT_CHECKS", "1")
     with pytest.raises(pytest.fail.Exception, match=name):
-        _configured(name)
+        configured_export_setting(name)
     monkeypatch.delenv("GDRIVE_FSSPEC_REQUIRE_EXPORT_CHECKS")
     with pytest.raises(pytest.skip.Exception, match=name):
-        _configured(name)
+        configured_export_setting(name)

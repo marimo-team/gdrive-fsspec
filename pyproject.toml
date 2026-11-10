@@ -58,11 +58,12 @@ version_file = "src/gdrive_fsspec/_version.py"
 [tool.pytest.ini_options]
 addopts = """\
     --strict-markers \
-    -m "not (integration)"
+    -m "not (integration or drive_exports)"
     """
 
 markers = [
     "integration: marks test as integration test consuming external resources (select with '-m integration')",
+    "drive_exports: live export content and upstream catalog checks (select with '-m drive_exports')",
     "xdist_group(name): assign tests to the same pytest-xdist worker (pytest-xdist)",
 ]
 

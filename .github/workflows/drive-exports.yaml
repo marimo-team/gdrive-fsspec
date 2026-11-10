@@ -27,7 +27,7 @@ jobs:
       - name: Compare the live API catalog with the reviewed snapshot
         env:
           GDRIVE_FSSPEC_CREDENTIALS_PATH: ${{ secrets.GDRIVE_FSSPEC_CREDENTIALS_PATH }}
-        run: uv run pytest -vv -m integration tests/test_export_integration.py -k export_catalog
+        run: uv run pytest -vv -m drive_exports tests/test_export_integration.py -k export_catalog
 
   public-exports:
     name: Public export content
@@ -46,4 +46,4 @@ jobs:
           GDRIVE_FSSPEC_PUBLIC_SPREADSHEETS: ${{ vars.GDRIVE_FSSPEC_PUBLIC_SPREADSHEETS }}
           GDRIVE_FSSPEC_PUBLIC_PRESENTATION: ${{ vars.GDRIVE_FSSPEC_PUBLIC_PRESENTATION }}
           GDRIVE_FSSPEC_PUBLIC_DRAWINGS: ${{ vars.GDRIVE_FSSPEC_PUBLIC_DRAWINGS }}
-        run: uv run pytest -vv -m integration tests/test_export_integration.py -k public_export
+        run: uv run pytest -vv -m drive_exports tests/test_export_integration.py -k public_export
