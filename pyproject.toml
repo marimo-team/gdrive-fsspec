@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
+requires = ["setuptools>=77.0.3", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -26,21 +26,23 @@ classifiers = [
 dependencies = [
     "fsspec",
     "google-api-python-client",
+    "google-auth",
     "google-auth-httplib2",
     "google-auth-oauthlib",
+    "httplib2",
     "pydata_google_auth",
     "typing-extensions>=4.15.0",
 ]
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.6.2",
+    "pre-commit>=4.7.0; python_version >= '3.11'",
     "google-api-python-client-stubs>=1.40.0",
-    "pyrefly>=1.2.0",
-    "pytest>=9.1.1",
+    "pyrefly>=1.4.1",
+    "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.16.6",
+    "ruff>=0.17.4",
 ]
 
 [project.urls]
@@ -72,6 +74,13 @@ search-path = ["tests"]
 [tool.pyrefly.errors]
 unannotated-return = "error"
 unannotated-parameter = "error"
+
+[[tool.pyrefly.sub-config]]
+matches = "tests/**"
+
+[tool.pyrefly.sub-config.errors]
+# Tests replace instance methods with mocks.
+method-assign = false
 
 [tool.coverage.run]
 source_pkgs = ["gdrive_fsspec"]

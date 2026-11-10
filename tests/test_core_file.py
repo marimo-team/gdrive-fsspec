@@ -4,6 +4,7 @@ import io
 import json
 from typing import Any
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from conftest import MockedDriveFS, empty_headers, empty_listing
@@ -481,6 +482,35 @@ def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:
 
     headers = mocked_fs.files._http.request.call_args.kwargs["headers"]
     assert headers["Content-Range"] == "bytes 0-999/*"
+
+
+@pytest.mark.parametrize(
+    "query", ["", "?upload_id=abc", "?upload_id=abc&supportsAllDrives=false"]
+)
+def test_upload_chunk_preserves_session_query(
+    mocked_fs: MockedDriveFS, query: str
+) -> None:
+    mocked_fs.authed_http.request.return_value = (
+        {"status": "308", "range": "bytes=0-3"},
+        b"",
+    )
+    file = _write_file(mocked_fs.fs)
+    file.location = f"https://upload.example/resume{query}"
+    file.write(b"data")
+    file.offset = 0
+
+    try:
+        assert file._upload_chunk() is True
+    finally:
+        file.closed = True
+
+    uri = mocked_fs.authed_http.request.call_args.args[0]
+    parts = urlsplit(uri)
+    assert parts.path == "/resume"
+    expected = {"supportsAllDrives": ["true"]}
+    if query:
+        expected["upload_id"] = ["abc"]
+    assert parse_qs(parts.query) == expected
 
 
 def test_upload_chunk_final_308_raises(mocked_fs: MockedDriveFS) -> None:

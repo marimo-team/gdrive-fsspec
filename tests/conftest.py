@@ -273,13 +273,13 @@ def _remove_testdir(instance: GoogleDriveFileSystem) -> None:
     try:
         if not instance.exists(TESTDIR):
             return
-    except (OSError, PermissionError, HttpError):
+    except (OSError, HttpError):
         return
     for permanent in (True, False):
         try:
             instance.rm(TESTDIR, recursive=True, permanent=permanent)
             return
-        except (OSError, PermissionError, HttpError):
+        except (OSError, HttpError):
             continue
 
 

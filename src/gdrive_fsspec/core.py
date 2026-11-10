@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     FilesResource = DriveResource.FilesResource
 
 
-class _PageListKwargs(TypedDict, total=False):
+class _PageListKwargs(TypedDict, total=False, closed=True):
     """The ``list`` method doesn't enforce good type params, so we use a TypedDict to help."""
 
     pageToken: str
@@ -498,8 +498,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 li for li in listing if li["name"] != stripped_path
             ]
 
-        # Drop any cached listing rooted at the deleted path (it was a directory).
-        self.dircache.pop(stripped_path, None)
+        for key in self._cached_subtree(stripped_path):
+            self.dircache.pop(key, None)
 
     @override
     def rm(
