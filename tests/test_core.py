@@ -311,20 +311,28 @@ def test_ls_missing_child_in_cached_parent_raises(
 
 
 def test_invalidate_cache_path(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [{"name": "parent/file", "size": 0, "type": "file"}]
-    anon_fs.dircache["other"] = [{"name": "other/file", "size": 0, "type": "file"}]
+    anon_fs.dircache["parent"] = [
+        {"id": "parent-file-id", "name": "parent/file", "size": 0, "type": "file"}
+    ]
+    anon_fs.dircache["other"] = [
+        {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
+    ]
 
     anon_fs.invalidate_cache("parent")
 
     assert "parent" not in anon_fs.dircache
     assert anon_fs.dircache["other"] == [
-        {"name": "other/file", "size": 0, "type": "file"}
+        {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
     ]
 
 
 def test_invalidate_cache_all(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [{"name": "parent/file", "size": 0, "type": "file"}]
-    anon_fs.dircache["other"] = [{"name": "other/file", "size": 0, "type": "file"}]
+    anon_fs.dircache["parent"] = [
+        {"id": "parent-file-id", "name": "parent/file", "size": 0, "type": "file"}
+    ]
+    anon_fs.dircache["other"] = [
+        {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
+    ]
 
     anon_fs.invalidate_cache()
 

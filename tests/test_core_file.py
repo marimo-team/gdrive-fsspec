@@ -87,10 +87,11 @@ def _read_file(
     return GoogleDriveFile(fs, path, mode="rb")
 
 
-def test_fetch_range_full_read(mocked_fs: MockedDriveFS) -> None:
+@pytest.mark.parametrize("has_headers", [False, True])
+def test_fetch_range_full_read(mocked_fs: MockedDriveFS, has_headers: bool) -> None:
     fs = mocked_fs.fs
     media = mock.Mock()
-    media.headers = empty_headers()
+    media.headers = empty_headers() if has_headers else None
     media.execute.return_value = b"hello"
     mocked_fs.files.get_media.return_value = media
 
@@ -101,6 +102,7 @@ def test_fetch_range_full_read(mocked_fs: MockedDriveFS) -> None:
     mocked_fs.files.get_media.assert_called_once_with(
         fileId="file-id", supportsAllDrives=True
     )
+    assert media.headers is not None
     assert "Range" not in media.headers
 
 
@@ -881,6 +883,58 @@ def test_upload_chunk_permission_403_not_retried(mocked_fs: MockedDriveFS) -> No
             file.closed = True
 
     mocked_fs.files._http.request.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"\xff",
+        b"not json",
+        b"null",
+        b'{"error": []}',
+        b'{"error": {"errors": null}}',
+        b'{"error": {"errors": {}}}',
+        b'{"error": {"errors": [null, {"reason": []}, {"reason": {}}]}}',
+    ],
+)
+def test_upload_chunk_malformed_403_preserves_http_error(
+    mocked_fs: MockedDriveFS, body: bytes
+) -> None:
+    mocked_fs.authed_http.request.return_value = ({"status": "403"}, body)
+    file = _write_file(mocked_fs.fs)
+    file.write(b"data")
+    file.offset = 0
+
+    try:
+        with pytest.raises(OSError, match=r"Chunk upload failed \(HTTP 403\)"):
+            file._upload_chunk()
+    finally:
+        file.closed = True
+
+    mocked_fs.authed_http.request.assert_called_once()
+
+
+def test_upload_chunk_retries_rate_limit_after_malformed_entry(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    body = json.dumps(
+        {"error": {"errors": [None, {"reason": []}, {"reason": "rateLimitExceeded"}]}}
+    ).encode()
+    mocked_fs.authed_http.request.side_effect = [
+        ({"status": "403"}, body),
+        ({"status": "308", "range": "bytes=0-3"}, b""),
+    ]
+    file = _write_file(mocked_fs.fs)
+    file.write(b"data")
+    file.offset = 0
+
+    try:
+        assert file._upload_chunk() is True
+    finally:
+        file.closed = True
+
+    assert mocked_fs.authed_http.request.call_count == 2
 
 
 def test_upload_chunk_final_retry_after_503_does_not_double_update_dircache(

@@ -95,20 +95,53 @@ def test_normalize_path(prefix: str, name: str, expected: str) -> None:
 )
 def test_finfo_from_response_type(mime_type: str, expected_type: str) -> None:
     info = _finfo_from_response(
-        {"name": "child", "mimeType": mime_type}, path_prefix="parent"
+        {"id": "child-id", "name": "child", "mimeType": mime_type},
+        path_prefix="parent",
     )
     assert info["type"] == expected_type
     assert info["name"] == "parent/child"
+    assert info["id"] == "child-id"
 
 
 def test_finfo_from_response_casts_size() -> None:
-    assert _finfo_from_response({"name": "x", "size": "12"})["size"] == 12
+    assert _finfo_from_response({"id": "x-id", "name": "x", "size": "12"})["size"] == 12
 
 
 def test_finfo_from_response_defaults_missing_size() -> None:
-    assert _finfo_from_response({"name": "x"})["size"] == 0
+    assert _finfo_from_response({"id": "x-id", "name": "x"})["size"] == 0
 
 
 def test_finfo_from_response_strips_leading_slash() -> None:
-    info = _finfo_from_response({"name": "f"}, path_prefix="/top")
+    info = _finfo_from_response({"id": "f-id", "name": "f"}, path_prefix="/top")
     assert info["name"] == "top/f"
+
+
+def test_finfo_from_response_requires_id() -> None:
+    with pytest.raises(KeyError, match="id"):
+        _finfo_from_response({"name": "missing-id"})
+
+
+def test_finfo_from_response_preserves_metadata_while_normalizing() -> None:
+    info = _finfo_from_response(
+        {
+            "id": "file-id",
+            "name": "report.txt",
+            "size": "12",
+            "mimeType": "text/plain",
+            "description": "Quarterly report",
+            "properties": {"source": "accounting"},
+            "capabilities": {"canDelete": True},
+        },
+        path_prefix="reports",
+    )
+
+    assert info == {
+        "id": "file-id",
+        "name": "reports/report.txt",
+        "size": 12,
+        "type": "file",
+        "mimeType": "text/plain",
+        "description": "Quarterly report",
+        "properties": {"source": "accounting"},
+        "capabilities": {"canDelete": True},
+    }

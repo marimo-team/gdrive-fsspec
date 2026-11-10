@@ -27,6 +27,9 @@ from .typing_utils import override
 from .utils import redact_uri
 
 if TYPE_CHECKING:
+    from googleapiclient._apis.drive.v3.resources import BytesHttpRequest
+    from googleapiclient._apis.drive.v3.schemas import File
+
     from .core import GoogleDriveFileSystem
 
 
@@ -44,11 +47,24 @@ def _should_retry_status(status: int, content: bytes) -> bool:
         return False
 
     try:
-        error = json.loads(content.decode("utf-8")).get("error", {})
-        reasons = {entry.get("reason") for entry in error.get("errors", [])}
-    except (UnicodeDecodeError, ValueError, AttributeError):
+        payload: object = json.loads(content)
+    except ValueError:
         return False
-    return bool(reasons & _RETRYABLE_403_REASONS)
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    errors = error.get("errors")
+    if not isinstance(errors, list):
+        return False
+    for entry in errors:
+        if not isinstance(entry, dict):
+            continue
+        reason = entry.get("reason")
+        if isinstance(reason, str) and reason in _RETRYABLE_403_REASONS:
+            return True
+    return False
 
 
 def _with_supports_all_drives(url: str) -> str:
@@ -86,6 +102,8 @@ def _parse_range_end(range_header: str | None) -> int | None:
 
 
 class GoogleDriveFile(AbstractBufferedFile):
+    fs: GoogleDriveFileSystem
+
     def __init__(
         self,
         fs: GoogleDriveFileSystem,
@@ -173,7 +191,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         # Defined unconditionally so neither is branch-conditional: _media_object
         # is set lazily on the read path (_fetch_range); location is the
         # resumable-upload URI set by _initiate_upload on the write path.
-        self._media_object: Any | None = None
+        self._media_object: BytesHttpRequest | None = None
         self.location: str | None = None
         if mode == "wb":
             self.file_id: str | None = existing_id
@@ -208,18 +226,20 @@ class GoogleDriveFile(AbstractBufferedFile):
             self._media_object = self.fs.files.get_media(
                 fileId=self.file_id, supportsAllDrives=True
             )
+        headers = self._media_object.headers
+        if headers is None:
+            headers = dict[str, str]()
+            self._media_object.headers = headers
         if start is not None or end is not None:
             # HTTP byte ranges are inclusive; ``end`` here is exclusive. An open
             # end (``None``) means "through EOF", expressed as ``bytes=<start>-``.
             range_start = start or 0
             if end is not None:
-                self._media_object.headers["Range"] = (
-                    f"bytes={range_start:d}-{end - 1:d}"
-                )
+                headers["Range"] = f"bytes={range_start:d}-{end - 1:d}"
             else:
-                self._media_object.headers["Range"] = f"bytes={range_start:d}-"
+                headers["Range"] = f"bytes={range_start:d}-"
         else:
-            self._media_object.headers.pop("Range", None)
+            headers.pop("Range", None)
         try:
             data = self._media_object.execute(num_retries=_NUM_RETRIES)
             return data
@@ -330,7 +350,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         if status in [200, 201]:
             # server thinks we are finished - this should happen
             # only when closing
-            blob = json.loads(body.decode())
+            blob: File = json.loads(body.decode())
             self.file_id = blob["id"]
             parent = self.fs._parent(self.path)
             info = _finfo_from_response(blob, path_prefix=parent)

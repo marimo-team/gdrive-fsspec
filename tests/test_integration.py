@@ -1090,7 +1090,6 @@ def test_changes_sync_failure_serves_cache(
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(reason="dircache not updated correctly after mutations", strict=True)
 def test_rm_recursive_deletes_directory_tree(fs: GoogleDriveFileSystem) -> None:
     root = _test_path("tree")
     fs.makedirs(root + "/a/b")
@@ -1098,10 +1097,6 @@ def test_rm_recursive_deletes_directory_tree(fs: GoogleDriveFileSystem) -> None:
         f.write(b"leaf")
 
     fs.rm(root, recursive=True)
-
-    # Recursive delete only pops the root listing from dircache; nested
-    # listings populated during setup may linger until invalidated.
-    # fs.invalidate_cache()
 
     assert not fs.exists(root)
     assert not fs.exists(root + "/a")
