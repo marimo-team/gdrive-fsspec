@@ -27,7 +27,7 @@ Install `uv` and `pre-commit`:
 3. Install pre-commit hooks:
 
    ```sh
-   pre-commit install
+   uv run pre-commit install
    ```
 
 ## Running checks locally
@@ -37,7 +37,7 @@ CI runs the same checks you can run before pushing:
 **Lint** (ruff, codespell, formatting, and more via pre-commit):
 
 ```sh
-pre-commit run --all-files
+uv run pre-commit run --all-files
 ```
 
 **Type checking** (pyrefly):

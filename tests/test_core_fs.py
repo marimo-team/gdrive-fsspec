@@ -196,6 +196,32 @@ def test_rm_requests_capabilities_and_drive_id(mocked_fs: MockedDriveFS) -> None
     )
 
 
+@pytest.mark.parametrize("permanent", [False, True])
+def test_rm_directory_invalidates_cached_descendants(
+    mocked_fs: MockedDriveFS, permanent: bool
+) -> None:
+    fs = mocked_fs.fs
+    fs.dircache[""] = [
+        {"id": "dir-id", "name": "folder", "size": 0, "type": "directory"}
+    ]
+    for path in ["folder", "folder/child", "folder/child/nested", "folder-other"]:
+        fs.dircache[path] = empty_listing()
+
+    with mock.patch.object(
+        fs,
+        "info",
+        return_value={
+            "id": "dir-id",
+            "capabilities": {"canTrash": True, "canDelete": True},
+        },
+    ):
+        fs.rm("folder", permanent=permanent)
+
+    assert set(fs.dircache) == {"", "folder-other"}
+    with pytest.raises(FileNotFoundError):
+        fs.ls("folder/child")
+
+
 def test_rm_no_trash_permission_raises(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.info = mock.Mock(

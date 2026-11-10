@@ -39,7 +39,6 @@ from gdrive_fsspec._constants import (
     _NUM_RETRIES,
     MultipleFilesError,
 )
-from gdrive_fsspec._file import GoogleDriveFile
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
@@ -1181,10 +1180,7 @@ def test_transaction_rollback_discards_upload(fs: GoogleDriveFileSystem) -> None
         pass
 
     with pytest.raises(Boom), fs.transaction:
-        f = cast(
-            GoogleDriveFile,
-            fs.open(fn, "wb", block_size=block_size, autocommit=False),
-        )
+        f = fs.open(fn, "wb", block_size=block_size, autocommit=False)
         try:
             f.write(data)  # flushes ≥1 block → opens the resumable session
             assert f.location is not None, "expected an open upload session"
@@ -1210,10 +1206,7 @@ def test_discard_after_partial_write(fs: GoogleDriveFileSystem) -> None:
     """
     block_size = 256 * 1024
     fn = _test_path("discarded")
-    f = cast(
-        GoogleDriveFile,
-        fs.open(fn, "wb", block_size=block_size, autocommit=False),
-    )
+    f = fs.open(fn, "wb", block_size=block_size, autocommit=False)
     try:
         f.write(b"q" * (block_size + 1))  # start the session
         assert f.location is not None

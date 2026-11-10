@@ -318,7 +318,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             {"Content-Type": "application/octet-stream", "Content-Length": str(length)}
         )
         response, body = self._authed_request(
-            self.location + "&supportsAllDrives=true",
+            _with_supports_all_drives(self.location),
             "PUT",
             body=data,
             headers=head,
