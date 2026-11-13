@@ -3,7 +3,7 @@ from typing import Any, Literal, cast
 from unittest import mock
 
 import pytest
-from conftest import MockedDriveFS
+from conftest import MockedDriveFS, make_api_fs
 from googleapiclient.errors import HttpError
 from googleapiclient.http import HttpRequest
 
@@ -12,18 +12,17 @@ from gdrive_fsspec._file import GoogleDriveFile
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
-def test_create_anon(anon_fs: GoogleDriveFileSystem) -> None:
-    assert anon_fs.service is not None
+def test_create_api(api_fs: GoogleDriveFileSystem) -> None:
+    assert api_fs.service is not None
 
 
-def test_srv_is_deprecated_alias(anon_fs: GoogleDriveFileSystem) -> None:
+def test_srv_is_deprecated_alias(api_fs: GoogleDriveFileSystem) -> None:
     with pytest.warns(DeprecationWarning):
-        assert anon_fs.srv is anon_fs.service
+        assert api_fs.srv is api_fs.service
 
 
 def test_auth_kwargs() -> None:
-    fs = GoogleDriveFileSystem(
-        token="anon",
+    fs = make_api_fs(
         auth_kwargs={"user_email": "test@example.com"},
         skip_instance_cache=True,
     )
@@ -54,19 +53,18 @@ def test_access_scopes_mapping(
     access: Literal["full_control", "read_only"],
     expected_scopes: list[str],
 ) -> None:
-    fs = GoogleDriveFileSystem(token="anon", access=access, skip_instance_cache=True)
+    fs = make_api_fs(access=access, skip_instance_cache=True)
     assert fs.scopes == expected_scopes
 
 
 def test_upload_chunk_without_parent_dircache() -> None:
-    fs = GoogleDriveFileSystem(
-        token="anon", skip_instance_cache=True, use_listings_cache=False
-    )
+    fs = make_api_fs(use_listings_cache=False)
     fs.files = mock.Mock()
-    fs.authed_http = mock.Mock()
+    http = mock.Mock()
+    fs.authed_http = http
     # New file: the path does not exist yet.
     fs.info = mock.Mock(side_effect=FileNotFoundError("parent/file.txt"))
-    fs.authed_http.request.return_value = (
+    http.request.return_value = (
         {"status": "200"},
         json.dumps({"id": "file-id", "name": "file.txt", "size": "4"}).encode(),
     )
@@ -85,25 +83,25 @@ def test_upload_chunk_without_parent_dircache() -> None:
     assert file.file_id == "file-id"
 
 
-def test_drive_kw_without_drive(anon_fs: GoogleDriveFileSystem) -> None:
-    assert anon_fs._drive_kw() == {}
+def test_drive_kw_without_drive(api_fs: GoogleDriveFileSystem) -> None:
+    assert api_fs._drive_kw() == {}
 
 
-def test_drive_kw_with_drive(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.drive = "drive-123"
-    kw = anon_fs._drive_kw()
+def test_drive_kw_with_drive(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.drive = "drive-123"
+    kw = api_fs._drive_kw()
     assert kw["driveId"] == "drive-123"
     assert kw["supportsAllDrives"] is True
 
 
-def test_root_info(anon_fs: GoogleDriveFileSystem) -> None:
-    info = anon_fs.info("")
+def test_root_info(api_fs: GoogleDriveFileSystem) -> None:
+    info = api_fs.info("")
     assert info == {
         "name": "",
         "mimeType": DIR_MIME_TYPE,
         "type": "directory",
         "size": 0,
-        "id": anon_fs.root_file_id,
+        "id": api_fs.root_file_id,
     }
 
 
@@ -274,26 +272,26 @@ def test_validate_root_file_id_propagates_non_404_from_files_get(
     assert exc_info.value.status_code == 403
 
 
-def test_ls_empty_root_returns_empty(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs._list_children = mock.Mock(return_value=[])
+def test_ls_empty_root_returns_empty(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs._list_children = mock.Mock(return_value=[])
 
-    assert anon_fs.ls("") == []
-    assert anon_fs.dircache[""] == []
+    assert api_fs.ls("") == []
+    assert api_fs.dircache[""] == []
 
 
-def test_ls_missing_path_raises(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs._find_child_by_name = mock.Mock(return_value=None)
+def test_ls_missing_path_raises(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs._find_child_by_name = mock.Mock(return_value=None)
 
     with pytest.raises(FileNotFoundError):
-        anon_fs.ls("missing")
+        api_fs.ls("missing")
 
 
 def test_ls_missing_child_in_cached_parent_raises(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     # A cached parent listing is authoritative: a name missing from it raises
     # without any API call.
-    anon_fs.dircache[""] = [
+    api_fs.dircache[""] = [
         {
             "name": "other",
             "id": "other-id",
@@ -302,63 +300,63 @@ def test_ls_missing_child_in_cached_parent_raises(
             "mimeType": "text/plain",
         }
     ]
-    anon_fs._find_child_by_name = mock.Mock()
+    api_fs._find_child_by_name = mock.Mock()
 
     with pytest.raises(FileNotFoundError):
-        anon_fs.ls("missing")
+        api_fs.ls("missing")
 
-    anon_fs._find_child_by_name.assert_not_called()
+    api_fs._find_child_by_name.assert_not_called()
 
 
-def test_invalidate_cache_path(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [
+def test_invalidate_cache_path(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.dircache["parent"] = [
         {"id": "parent-file-id", "name": "parent/file", "size": 0, "type": "file"}
     ]
-    anon_fs.dircache["other"] = [
+    api_fs.dircache["other"] = [
         {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
     ]
 
-    anon_fs.invalidate_cache("parent")
+    api_fs.invalidate_cache("parent")
 
-    assert "parent" not in anon_fs.dircache
-    assert anon_fs.dircache["other"] == [
+    assert "parent" not in api_fs.dircache
+    assert api_fs.dircache["other"] == [
         {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
     ]
 
 
-def test_invalidate_cache_all(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.dircache["parent"] = [
+def test_invalidate_cache_all(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.dircache["parent"] = [
         {"id": "parent-file-id", "name": "parent/file", "size": 0, "type": "file"}
     ]
-    anon_fs.dircache["other"] = [
+    api_fs.dircache["other"] = [
         {"id": "other-file-id", "name": "other/file", "size": 0, "type": "file"}
     ]
 
-    anon_fs.invalidate_cache()
+    api_fs.invalidate_cache()
 
-    assert anon_fs.dircache == {}
-
-
-def test_resolve_drive_id_by_name(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.drives = [{"id": "1", "name": "foo"}, {"id": "2", "name": "bar"}]
-    assert anon_fs._resolve_drive_id("foo") == "1"
+    assert api_fs.dircache == {}
 
 
-def test_resolve_drive_id_by_id(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.drives = [{"id": "1", "name": "foo"}, {"id": "2", "name": "bar"}]
-    assert anon_fs._resolve_drive_id("2") == "2"
+def test_resolve_drive_id_by_name(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.drives = [{"id": "1", "name": "foo"}, {"id": "2", "name": "bar"}]
+    assert api_fs._resolve_drive_id("foo") == "1"
 
 
-def test_resolve_drive_id_missing(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.drives = [{"id": "1", "name": "foo"}]
+def test_resolve_drive_id_by_id(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.drives = [{"id": "1", "name": "foo"}, {"id": "2", "name": "bar"}]
+    assert api_fs._resolve_drive_id("2") == "2"
+
+
+def test_resolve_drive_id_missing(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.drives = [{"id": "1", "name": "foo"}]
     with pytest.raises(ValueError, match="not found by id or name"):
-        anon_fs._resolve_drive_id("missing")
+        api_fs._resolve_drive_id("missing")
 
 
-def test_resolve_drive_id_duplicate_name(anon_fs: GoogleDriveFileSystem) -> None:
-    anon_fs.drives = [{"id": "1", "name": "dup"}, {"id": "2", "name": "dup"}]
+def test_resolve_drive_id_duplicate_name(api_fs: GoogleDriveFileSystem) -> None:
+    api_fs.drives = [{"id": "1", "name": "dup"}, {"id": "2", "name": "dup"}]
     with pytest.raises(ValueError, match="multiple shared drives"):
-        anon_fs._resolve_drive_id("dup")
+        api_fs._resolve_drive_id("dup")
 
 
 @pytest.mark.parametrize(

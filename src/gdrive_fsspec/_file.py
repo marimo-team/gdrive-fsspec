@@ -22,6 +22,7 @@ from ._constants import (
     PathLike,
     _finfo_from_response,
 )
+from ._read import ReadSnapshot, ReadSource
 from .types import FileInfo
 from .typing_utils import override
 from .utils import redact_uri
@@ -103,6 +104,7 @@ def _parse_range_end(range_header: str | None) -> int | None:
 
 class GoogleDriveFile(AbstractBufferedFile):
     fs: GoogleDriveFileSystem
+    _read_source: ReadSource | None = None
 
     def __init__(
         self,
@@ -128,8 +130,7 @@ class GoogleDriveFile(AbstractBufferedFile):
             **kwargs: Passed to :class:`AbstractBufferedFile`.
 
         Raises:
-            IsADirectoryError: If ``mode`` is ``"wb"`` and ``path`` is an
-                existing directory.
+            IsADirectoryError: If ``path`` is a directory.
             MultipleFilesError: If ``path`` already resolves to multiple files.
             ValueError: If ``path`` is a Google-native file with no available
                 export format (or an unsupported ``export_mime_type``).
@@ -140,9 +141,10 @@ class GoogleDriveFile(AbstractBufferedFile):
         read_id: str | None = None
         read_info: FileInfo | None = None
         read_size: int | None = None
-        native_data: bytes | None = None
+        read_source: ReadSource | None = None
 
         if mode == "wb":
+            fs._require_authenticated()
             # If the path already exists, remember its id so the upload PATCHes
             # the existing file instead of creating an identically-named
             # duplicate.
@@ -157,37 +159,37 @@ class GoogleDriveFile(AbstractBufferedFile):
                     raise IsADirectoryError(path)
                 existing_id = existing["id"]
         else:
-            # Resolve metadata once, up front: the size must be known before
-            # AbstractBufferedFile builds its read cache, since a stale size of
-            # 0 makes every read short-circuit to b"". Google-native files (Docs,
-            # Sheets, ...) report no size and are not downloadable via get_media,
-            # so materialize them now via files.export and serve reads from the
-            # in-memory buffer.
+            # Resolve size before fsspec builds its read cache; native metadata
+            # reports zero even when the exported content is nonempty.
             read_info = fs.info(path)
+            if read_info["type"] == "directory":
+                raise IsADirectoryError(path)
             read_id = read_info["id"]
-            source_mime = read_info.get("mimeType", "")
-            if fs._is_google_native(source_mime):
-                target_mime = fs._resolve_export_mime(source_mime, export_mime_type)
-                native_data = fs._export_media(read_id, target_mime)
-                read_size = len(native_data)
-                # The export is fully materialized in memory, so read-ahead
-                # would only make redundant copies. Serve slices from the buffer
-                # with a no-op cache unless the caller asked for something else.
-                kwargs.setdefault("cache_type", "none")
+            read_source = fs._prepare_read(read_info, export_mime_type)
+            if read_source is not None:
+                read_size = read_source.size
             else:
                 read_size = read_info["size"]
+            if isinstance(read_source, ReadSnapshot):
+                kwargs.setdefault("cache_type", "none")
 
-        super().__init__(
-            fs,
-            path,
-            mode,
-            block_size,
-            autocommit=autocommit,
-            size=read_size,
-            **kwargs,
-        )
+        self._read_source = read_source
+        try:
+            super().__init__(
+                fs,
+                path,
+                mode,
+                block_size,
+                autocommit=autocommit,
+                size=read_size,
+                **kwargs,
+            )
+        except BaseException:
+            self._read_source = None
+            if read_source is not None:
+                read_source.close()
+            raise
 
-        self._native_data: bytes | None = native_data  # Google-native files only
         # Defined unconditionally so neither is branch-conditional: _media_object
         # is set lazily on the read path (_fetch_range); location is the
         # resumable-upload URI set by _initiate_upload on the write path.
@@ -214,10 +216,10 @@ class GoogleDriveFile(AbstractBufferedFile):
             Requested byte range, or empty bytes if the range is not satisfiable.
         """
 
-        if self._native_data is not None:
-            # Google-native files are fully materialized via files.export
-            # export has no server-side byte-range support, so serve the requested slice from memory.
-            return self._native_data[start:end]
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        if self._read_source is not None:
+            return self._read_source.read_range(start, end)
         if self.file_id is None:
             # _fetch_range only runs on read-mode files, whose id is resolved in
             # __init__; guard the invariant rather than send fileId=None.
@@ -248,6 +250,15 @@ class GoogleDriveFile(AbstractBufferedFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
+
+    @override
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            source, self._read_source = self._read_source, None
+            if source is not None:
+                source.close()
 
     def _authed_request(
         self,

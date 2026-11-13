@@ -19,6 +19,7 @@ from gdrive_fsspec._constants import (
     MultipleFilesError,
 )
 from gdrive_fsspec._file import GoogleDriveFile
+from gdrive_fsspec._read import ReadSnapshot
 from gdrive_fsspec.core import GoogleDriveFileSystem
 from gdrive_fsspec.types import FileInfo
 from gdrive_fsspec.utils import merge_fields
@@ -1179,30 +1180,30 @@ def test_mv_list_paths_delegate_to_base_copy_then_delete(
 
 
 def test_ls_from_dircache_returns_sorted_names(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs.dircache["parent"] = [
+    api_fs.dircache["parent"] = [
         {"id": "b-id", "name": "parent/b", "size": 0, "type": "file"},
         {"id": "a-id", "name": "parent/a", "size": 0, "type": "file"},
     ]
 
-    assert anon_fs.ls("parent") == ["parent/a", "parent/b"]
+    assert api_fs.ls("parent") == ["parent/a", "parent/b"]
 
 
-def test_ls_from_dircache_detail(anon_fs: GoogleDriveFileSystem) -> None:
+def test_ls_from_dircache_detail(api_fs: GoogleDriveFileSystem) -> None:
     listing: list[FileInfo] = [
         {"id": "a-id", "name": "parent/a", "size": 0, "type": "file"}
     ]
-    anon_fs.dircache["parent"] = listing
+    api_fs.dircache["parent"] = listing
 
-    assert anon_fs.ls("parent", detail=True) == listing
+    assert api_fs.ls("parent", detail=True) == listing
 
 
-def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
+def test_ls_nested_directory(api_fs: GoogleDriveFileSystem) -> None:
     # The directory is resolved with a targeted query; only its own contents
     # are listed (and cached) — the parent is never listed.
-    anon_fs.root_file_id = "root"
-    anon_fs._find_child_by_name = mock.Mock(
+    api_fs.root_file_id = "root"
+    api_fs._find_child_by_name = mock.Mock(
         return_value={
             "name": "parent",
             "id": "parent-id",
@@ -1211,7 +1212,7 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
             "mimeType": DIR_MIME_TYPE,
         }
     )
-    anon_fs._list_children = mock.Mock(
+    api_fs._list_children = mock.Mock(
         return_value=[
             {
                 "name": "parent/child.txt",
@@ -1223,14 +1224,14 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
         ]
     )
 
-    assert anon_fs.ls("parent") == ["parent/child.txt"]
-    anon_fs._find_child_by_name.assert_called_once_with(
+    assert api_fs.ls("parent") == ["parent/child.txt"]
+    api_fs._find_child_by_name.assert_called_once_with(
         "root", "parent", trashed=False, path_prefix=""
     )
-    anon_fs._list_children.assert_called_once_with(
+    api_fs._list_children.assert_called_once_with(
         "parent-id", trashed=False, path_prefix="parent", fields=None
     )
-    assert anon_fs.dircache == {
+    assert api_fs.dircache == {
         "parent": [
             {
                 "name": "parent/child.txt",
@@ -1244,9 +1245,9 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
 
 
 def test_ls_nested_file_resolves_via_parent_listing(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs.dircache["parent"] = [
+    api_fs.dircache["parent"] = [
         {
             "name": "parent/child.txt",
             "id": "child-id",
@@ -1256,7 +1257,7 @@ def test_ls_nested_file_resolves_via_parent_listing(
         }
     ]
 
-    assert anon_fs.ls("parent/child.txt") == ["parent/child.txt"]
+    assert api_fs.ls("parent/child.txt") == ["parent/child.txt"]
 
 
 def test_info_honors_fields_after_listing_cache_warmed_without_them(
@@ -1429,71 +1430,71 @@ def test_info_cold_path_uses_targeted_resolution(
 
 
 def test_ls_non_canonical_bypasses_cache_read_and_write(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     fetched = [{"name": "a", "id": "1", "type": "file", "driveId": "drive-1"}]
-    anon_fs.dircache[""] = [{"name": "a", "id": "1", "size": 0, "type": "file"}]
-    anon_fs._list_children = mock.Mock(return_value=fetched)
+    api_fs.dircache[""] = [{"name": "a", "id": "1", "size": 0, "type": "file"}]
+    api_fs._list_children = mock.Mock(return_value=fetched)
 
-    result = anon_fs.ls("", detail=True, fields="driveId")
+    result = api_fs.ls("", detail=True, fields="driveId")
 
-    anon_fs._list_children.assert_called_once()
+    api_fs._list_children.assert_called_once()
     assert result[0]["driveId"] == "drive-1"
-    assert "driveId" not in anon_fs.dircache[""][0]
+    assert "driveId" not in api_fs.dircache[""][0]
 
-    anon_fs.dircache.clear()
-    anon_fs._list_children.reset_mock()
+    api_fs.dircache.clear()
+    api_fs._list_children.reset_mock()
 
-    anon_fs.ls("", detail=True, fields="driveId")
+    api_fs.ls("", detail=True, fields="driveId")
 
-    anon_fs._list_children.assert_called_once()
-    assert "" not in anon_fs.dircache
+    api_fs._list_children.assert_called_once()
+    assert "" not in api_fs.dircache
 
 
-def test_ls_fields_without_detail_raises(anon_fs: GoogleDriveFileSystem) -> None:
+def test_ls_fields_without_detail_raises(api_fs: GoogleDriveFileSystem) -> None:
     # Requesting fields with detail=False would silently discard them, since the
     # names-only result carries no metadata. Reject the misuse instead.
-    anon_fs._list_children = mock.Mock()
+    api_fs._list_children = mock.Mock()
 
     with pytest.raises(ValueError, match="detail=True"):
-        anon_fs.ls("", fields="driveId")
+        api_fs.ls("", fields="driveId")
 
-    anon_fs._list_children.assert_not_called()
+    api_fs._list_children.assert_not_called()
 
 
-def test_ls_empty_fields_uses_cache(anon_fs: GoogleDriveFileSystem) -> None:
+def test_ls_empty_fields_uses_cache(api_fs: GoogleDriveFileSystem) -> None:
     # A blank mask must not bypass the cache; it means no extra fields.
     cached: list[FileInfo] = [{"name": "a", "id": "1", "size": 0, "type": "file"}]
-    anon_fs.dircache[""] = cached
-    anon_fs._list_children = mock.Mock()
+    api_fs.dircache[""] = cached
+    api_fs._list_children = mock.Mock()
 
-    result = anon_fs.ls("", detail=True, fields="")
+    result = api_fs.ls("", detail=True, fields="")
 
     assert result == cached
-    anon_fs._list_children.assert_not_called()
+    api_fs._list_children.assert_not_called()
 
 
 def test_ls_skips_cache_when_trashed_requested(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     canonical: list[FileInfo] = [{"name": "a", "id": "1", "size": 0, "type": "file"}]
-    anon_fs.dircache[""] = list(canonical)
-    anon_fs._list_children = mock.Mock(
+    api_fs.dircache[""] = list(canonical)
+    api_fs._list_children = mock.Mock(
         return_value=[{"name": "trashed-a", "id": "2", "type": "file", "trashed": True}]
     )
 
-    result = anon_fs.ls("", detail=True, trashed=True)
+    result = api_fs.ls("", detail=True, trashed=True)
 
-    anon_fs._list_children.assert_called_once()
+    api_fs._list_children.assert_called_once()
     assert result[0]["name"] == "trashed-a"
-    assert anon_fs.dircache[""] == canonical
+    assert api_fs.dircache[""] == canonical
 
 
 def test_path_to_id_resolves_from_parent_dircache(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs.root_file_id = "root-id"
-    anon_fs.dircache["parent"] = [
+    api_fs.root_file_id = "root-id"
+    api_fs.dircache["parent"] = [
         {
             "name": "parent/child.txt",
             "id": "child-id",
@@ -1503,37 +1504,37 @@ def test_path_to_id_resolves_from_parent_dircache(
         }
     ]
 
-    assert anon_fs._path_to_id("") == "root-id"
-    assert anon_fs._path_to_id("parent/child.txt") == "child-id"
+    assert api_fs._path_to_id("") == "root-id"
+    assert api_fs._path_to_id("parent/child.txt") == "child-id"
 
 
 def test_path_to_id_missing_raises_file_not_found(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs.dircache["parent"] = [
+    api_fs.dircache["parent"] = [
         {"name": "parent/other", "id": "other-id", "size": 0, "type": "file"}
     ]
     with pytest.raises(FileNotFoundError):
-        anon_fs._path_to_id("parent/child")
+        api_fs._path_to_id("parent/child")
 
 
 def test_path_to_id_duplicate_raises_multiple_files_error(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     # Ambiguous resolution must fail, not silently pick one, so callers like the
     # write path can refuse to overwrite an arbitrary duplicate.
-    anon_fs.dircache["parent"] = [
+    api_fs.dircache["parent"] = [
         {"name": "parent/dup", "id": "1", "size": 0, "type": "file"},
         {"name": "parent/dup", "id": "2", "size": 0, "type": "file"},
     ]
     with pytest.raises(MultipleFilesError):
-        anon_fs._path_to_id("parent/dup")
+        api_fs._path_to_id("parent/dup")
 
 
-def test_resolve_entry_rejects_root(anon_fs: GoogleDriveFileSystem) -> None:
+def test_resolve_entry_rejects_root(api_fs: GoogleDriveFileSystem) -> None:
     # Root has no parent to list; callers must handle it before resolving.
     with pytest.raises(ValueError, match="root"):
-        anon_fs._resolve_entry("")
+        api_fs._resolve_entry("")
 
 
 def _dir_entry(path: str, file_id: str) -> FileInfo:
@@ -1557,10 +1558,10 @@ def _file_entry(path: str, file_id: str) -> FileInfo:
 
 
 def test_resolve_entry_cold_deep_path_uses_targeted_queries(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     # One targeted query per component, never a directory listing.
-    anon_fs.root_file_id = "root-id"
+    api_fs.root_file_id = "root-id"
     by_parent = {
         ("root-id", "a"): _dir_entry("a", "a-id"),
         ("a-id", "b"): _dir_entry("a/b", "b-id"),
@@ -1570,59 +1571,59 @@ def test_resolve_entry_cold_deep_path_uses_targeted_queries(
     def find_child(parent_id: str, name: str, **_kwargs: Any) -> FileInfo:
         return by_parent[(parent_id, name)]
 
-    anon_fs._find_child_by_name = mock.Mock(side_effect=find_child)
-    anon_fs._list_children = mock.Mock()
+    api_fs._find_child_by_name = mock.Mock(side_effect=find_child)
+    api_fs._list_children = mock.Mock()
 
-    entry = anon_fs._resolve_entry("a/b/f")
+    entry = api_fs._resolve_entry("a/b/f")
 
     assert entry["id"] == "f-id"
-    assert anon_fs._find_child_by_name.call_count == 3
-    anon_fs._list_children.assert_not_called()
-    assert anon_fs.dircache == {}
+    assert api_fs._find_child_by_name.call_count == 3
+    api_fs._list_children.assert_not_called()
+    assert api_fs.dircache == {}
 
 
 def test_resolve_entry_anchors_at_deepest_cached_ancestor(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
-    anon_fs.dircache["a/b"] = [_dir_entry("a/b/c", "c-id")]
-    anon_fs._find_child_by_name = mock.Mock(return_value=_file_entry("a/b/c/d", "d-id"))
+    api_fs.dircache["a/b"] = [_dir_entry("a/b/c", "c-id")]
+    api_fs._find_child_by_name = mock.Mock(return_value=_file_entry("a/b/c/d", "d-id"))
 
-    entry = anon_fs._resolve_entry("a/b/c/d")
+    entry = api_fs._resolve_entry("a/b/c/d")
 
     assert entry["id"] == "d-id"
-    anon_fs._find_child_by_name.assert_called_once_with(
+    api_fs._find_child_by_name.assert_called_once_with(
         "c-id", "d", trashed=False, path_prefix="a/b/c"
     )
 
 
 def test_resolve_entry_trashed_bypasses_cache(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     # Cached listings exclude trashed files, so they cannot answer trashed
     # lookups.
-    anon_fs.root_file_id = "root-id"
-    anon_fs.dircache[""] = empty_listing()
-    anon_fs._find_child_by_name = mock.Mock(return_value=_file_entry("gone", "gone-id"))
+    api_fs.root_file_id = "root-id"
+    api_fs.dircache[""] = empty_listing()
+    api_fs._find_child_by_name = mock.Mock(return_value=_file_entry("gone", "gone-id"))
 
-    entry = anon_fs._resolve_entry("gone", trashed=True)
+    entry = api_fs._resolve_entry("gone", trashed=True)
 
     assert entry["id"] == "gone-id"
-    anon_fs._find_child_by_name.assert_called_once_with(
+    api_fs._find_child_by_name.assert_called_once_with(
         "root-id", "gone", trashed=True, path_prefix=""
     )
 
 
 def test_resolve_entry_intermediate_file_raises(
-    anon_fs: GoogleDriveFileSystem,
+    api_fs: GoogleDriveFileSystem,
 ) -> None:
     # "a" is a file, so nothing can exist below it; no API call needed.
-    anon_fs.dircache[""] = [_file_entry("a", "a-id")]
-    anon_fs._find_child_by_name = mock.Mock()
+    api_fs.dircache[""] = [_file_entry("a", "a-id")]
+    api_fs._find_child_by_name = mock.Mock()
 
     with pytest.raises(FileNotFoundError):
-        anon_fs._resolve_entry("a/b")
+        api_fs._resolve_entry("a/b")
 
-    anon_fs._find_child_by_name.assert_not_called()
+    api_fs._find_child_by_name.assert_not_called()
 
 
 def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None:
@@ -1638,9 +1639,9 @@ def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None
     fs.info.assert_called_once_with("file.txt")
 
 
-def test_ls_file_resolves_directly(anon_fs: GoogleDriveFileSystem) -> None:
+def test_ls_file_resolves_directly(api_fs: GoogleDriveFileSystem) -> None:
     # ls on a file returns the file's own entry without listing its parent.
-    anon_fs._find_child_by_name = mock.Mock(
+    api_fs._find_child_by_name = mock.Mock(
         return_value={
             "name": "file.txt",
             "id": "file-id",
@@ -1648,11 +1649,11 @@ def test_ls_file_resolves_directly(anon_fs: GoogleDriveFileSystem) -> None:
             "mimeType": "text/plain",
         }
     )
-    anon_fs._list_children = mock.Mock()
+    api_fs._list_children = mock.Mock()
 
-    assert anon_fs.ls("file.txt") == ["file.txt"]
-    anon_fs._list_children.assert_not_called()
-    assert anon_fs.dircache == {}
+    assert api_fs.ls("file.txt") == ["file.txt"]
+    api_fs._list_children.assert_not_called()
+    assert api_fs.dircache == {}
 
 
 def test_ls_raises_multiple_files_error(mocked_fs: MockedDriveFS) -> None:
@@ -1924,16 +1925,16 @@ def test_export_streams_via_export_media(mocked_fs: MockedDriveFS) -> None:
     request = mock.Mock()
     mocked_fs.files.export_media.return_value = request
 
-    def fake_downloader(buffer: Any, req: Any) -> mock.Mock:
+    def fake_downloader(buffer: ReadSnapshot, req: object) -> mock.Mock:
         assert req is request
         downloader = mock.Mock()
         # Two chunks, then done; second next_chunk reports completion.
         chunks = iter([b"expo", b"rted"])
 
-        def next_chunk(**kwargs: Any) -> tuple[mock.Mock, bool]:
+        def next_chunk(**kwargs: object) -> tuple[mock.Mock, bool]:
             assert kwargs.get("num_retries") == _NUM_RETRIES
             buffer.write(next(chunks))
-            done = buffer.getvalue() == b"exported"
+            done = buffer.tell() == len(b"exported")
             return mock.Mock(), done
 
         downloader.next_chunk.side_effect = next_chunk
@@ -2032,10 +2033,10 @@ def test_export_without_mime_type_uses_default(mocked_fs: MockedDriveFS) -> None
     fs.info = mock.Mock(return_value={"id": "doc-id", "mimeType": DOC_MIME})
     _set_export_formats(fs, {DOC_MIME: ["application/pdf", "text/plain"]})
 
-    def fake_downloader(buffer: Any, req: Any) -> mock.Mock:
+    def fake_downloader(buffer: ReadSnapshot, req: object) -> mock.Mock:
         downloader = mock.Mock()
 
-        def next_chunk(**_kwargs: Any) -> tuple[mock.Mock, bool]:
+        def next_chunk(**_kwargs: object) -> tuple[mock.Mock, bool]:
             buffer.write(b"defaulted")
             return mock.Mock(), True
 
@@ -2106,9 +2107,6 @@ def _enable_sync(fs: GoogleDriveFileSystem, interval: float = 60) -> None:
     fs._changes_sync_interval = interval
     fs._changes_page_token = "T"
     fs._last_sync_monotonic = None
-    # These tests simulate an authenticated sync-enabled instance; the anon_fs
-    # fixture is anonymous, which the read hook (correctly) treats as dormant.
-    fs._is_anonymous = False
     # Seed the cached real root id so _build_dir_id_to_path does not issue a
     # files.get during sync. Tests that exercise root-level changes override it.
     fs.__dict__.setdefault("_resolved_root_id", fs.root_file_id)
@@ -2626,8 +2624,7 @@ def test_maybe_sync_dormant_when_interval_none(mocked_fs: MockedDriveFS) -> None
 
 
 def test_maybe_sync_dormant_when_anonymous(mocked_fs: MockedDriveFS) -> None:
-    # If an instance is reconnected to anonymous credentials after sync was
-    # enabled, the read hook must stay dormant (the Changes API needs auth).
+    # An anonymous identity must never poll the authenticated change feed.
     fs = mocked_fs.fs
     _enable_sync(fs)
     fs._is_anonymous = True

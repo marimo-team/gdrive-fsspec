@@ -1,10 +1,11 @@
 import os
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 from unittest import mock
 
 import pytest
+from google.auth.credentials import AnonymousCredentials
 from googleapiclient.errors import HttpError
 
 from gdrive_fsspec import GoogleDriveFileSystem
@@ -41,7 +42,7 @@ class MockedDriveFS(NamedTuple):
 
 
 @pytest.fixture()
-def mocked_fs(anon_fs: GoogleDriveFileSystem) -> MockedDriveFS:
+def mocked_fs(api_fs: GoogleDriveFileSystem) -> MockedDriveFS:
     files = mock.Mock()
     service = mock.Mock()
     authed_http = mock.Mock()
@@ -49,17 +50,35 @@ def mocked_fs(anon_fs: GoogleDriveFileSystem) -> MockedDriveFS:
     # discovery client's files()._http points at the same transport so tests
     # can assert on either handle interchangeably.
     files._http = authed_http
-    anon_fs.files = files
-    anon_fs.service = service
-    anon_fs.authed_http = authed_http
-    return MockedDriveFS(anon_fs, files, service, authed_http)
+    api_fs.files = files
+    api_fs.service = service
+    api_fs.authed_http = authed_http
+    return MockedDriveFS(api_fs, files, service, authed_http)
+
+
+def make_api_fs(
+    *,
+    access: Literal["full_control", "read_only"] = "full_control",
+    auth_kwargs: dict[str, object] | None = None,
+    use_listings_cache: bool = True,
+    skip_instance_cache: bool = True,
+) -> GoogleDriveFileSystem:
+    with mock.patch.object(
+        GoogleDriveFileSystem, "_connect_cache", return_value=AnonymousCredentials()
+    ):
+        return GoogleDriveFileSystem(
+            access=access,
+            auth_kwargs=auth_kwargs,
+            use_listings_cache=use_listings_cache,
+            skip_instance_cache=skip_instance_cache,
+        )
 
 
 @pytest.fixture()
-def anon_fs() -> GoogleDriveFileSystem:
+def api_fs() -> GoogleDriveFileSystem:
     # skip_instance_cache keeps each test's dircache isolated; fsspec otherwise
     # returns the same cached instance for identical constructor arguments.
-    return GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
+    return make_api_fs()
 
 
 # ---------------------------------------------------------------------------
