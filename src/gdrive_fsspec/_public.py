@@ -16,6 +16,7 @@ from urllib3.util.retry import Retry
 
 from ._constants import DIR_MIME_TYPE, LOGGER
 from ._read import READ_CHUNK_SIZE, ReadSnapshot
+from ._reference import DriveReference
 from .types import FileInfo
 from .typing_utils import override
 
@@ -107,39 +108,6 @@ class _AnonymousSession(requests.Session):
         prepared_request.headers.pop("Authorization", None)
 
 
-@dataclass(frozen=True)
-class PublicReference:
-    id: str
-    resource_key: str | None = None
-
-    @classmethod
-    def from_folder(cls, value: str) -> PublicReference:
-        if _ID.fullmatch(value) and value != "root":
-            return cls(value)
-        parts = urlsplit(value)
-        if parts.scheme != "https" or parts.hostname != "drive.google.com":
-            raise ValueError("Expected a public Google Drive folder URL or folder ID")
-        match = re.fullmatch(
-            r"/drive/(?:u/\d+/)?folders/([A-Za-z0-9_-]+)/?", parts.path
-        )
-        query = parse_qs(parts.query)
-        if match:
-            file_id = match[1]
-        elif parts.path == "/folderview" and query.get("id"):
-            file_id = query["id"][0]
-        else:
-            raise ValueError("Expected a Google Drive folder link")
-        if not _ID.fullmatch(file_id) or file_id == "root":
-            raise ValueError("Invalid public folder ID")
-        return cls(file_id, query.get("resourcekey", [None])[0])
-
-    def query(self) -> dict[str, str]:
-        params = {"id": self.id}
-        if self.resource_key:
-            params["resourcekey"] = self.resource_key
-        return params
-
-
 class _FolderParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -224,20 +192,20 @@ class _ConfirmationParser(HTMLParser):
             self._in_form = False
 
 
-def _entry(url: str, name: str) -> tuple[PublicReference, str | None]:
+def _entry(url: str, name: str) -> tuple[DriveReference, str | None]:
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise OSError("Public folder contains an unsupported file link")
     if parts.hostname == "drive.google.com" and "/folders/" in parts.path:
         try:
-            return PublicReference.from_folder(url), DIR_MIME_TYPE
+            return DriveReference.from_folder(url), DIR_MIME_TYPE
         except ValueError as error:
             raise OSError(f"Unsupported public folder link: {name!r}") from error
     query = parse_qs(parts.query)
     if parts.hostname == "drive.google.com" and parts.path == "/open":
         file_id = query.get("id", [""])[0]
         if _ID.fullmatch(file_id):
-            return PublicReference(file_id, query.get("resourcekey", [None])[0]), None
+            return DriveReference(file_id, query.get("resourcekey", [None])[0]), None
     match = re.fullmatch(
         r"/([a-z]+)/d/(?:e/)?([A-Za-z0-9_-]+)(?:/.*)?",
         parts.path,
@@ -251,7 +219,7 @@ def _entry(url: str, name: str) -> tuple[PublicReference, str | None]:
     key = parse_qs(parts.query).get("resourcekey", [None])[0]
     kind = match[1]
     mime = None if kind == "file" else _DOCUMENT_TYPES[kind].mime_type
-    return PublicReference(match[2], key), mime
+    return DriveReference(match[2], key), mime
 
 
 def _check_status(response: requests.Response) -> None:
@@ -266,7 +234,7 @@ def _check_status(response: requests.Response) -> None:
 
 
 class PublicDriveClient:
-    def __init__(self, root: PublicReference) -> None:
+    def __init__(self, root: DriveReference) -> None:
         self._references = {root.id: root}
         self._session = _AnonymousSession()
         self._session.headers.update(
@@ -288,7 +256,7 @@ class PublicDriveClient:
         }
 
     def list_children(self, folder_id: str, prefix: str) -> list[FileInfo]:
-        ref = self._references.get(folder_id, PublicReference(folder_id))
+        ref = self._references.get(folder_id, DriveReference(folder_id))
         with self._session.get(
             "https://drive.google.com/embeddedfolderview",
             params=ref.query(),
@@ -353,7 +321,7 @@ class PublicDriveClient:
                     return
             finally:
                 response.close()
-        ref = self._references.get(file_id, PublicReference(file_id))
+        ref = self._references.get(file_id, DriveReference(file_id))
         url = "https://drive.google.com/uc?" + urlencode(
             {**ref.query(), "export": "download"}
         )
@@ -473,7 +441,7 @@ class PublicDriveClient:
         self, file_id: str, source_mime: str, target_mime: str
     ) -> ReadSnapshot:
         kind, document = _EXPORTS_BY_MIME[source_mime]
-        ref = self._references.get(file_id, PublicReference(file_id))
+        ref = self._references.get(file_id, DriveReference(file_id))
         export_format = document.formats[target_mime]
         url = f"https://docs.google.com/{kind}/d/{file_id}/export"
         params: dict[str, str] = {}

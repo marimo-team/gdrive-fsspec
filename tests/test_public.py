@@ -14,8 +14,9 @@ from urllib3.response import HTTPResponse
 
 from gdrive_fsspec import GoogleDriveFileSystem
 from gdrive_fsspec._constants import MultipleFilesError
-from gdrive_fsspec._public import PublicDriveClient, PublicRead, PublicReference
+from gdrive_fsspec._public import PublicDriveClient, PublicRead
 from gdrive_fsspec._read import ReadSnapshot
+from gdrive_fsspec._reference import DriveReference
 
 
 def response(
@@ -87,7 +88,7 @@ def serve(fs: GoogleDriveFileSystem, *responses: requests.Response) -> mock.Mock
     ],
 )
 def test_folder_reference(url: str) -> None:
-    ref = PublicReference.from_folder(url)
+    ref = DriveReference.from_folder(url)
     assert ref.id == "folder-id"
     assert ref.resource_key == ("key" if "resourcekey" in url else None)
 
@@ -105,7 +106,7 @@ def test_folder_reference(url: str) -> None:
 )
 def test_invalid_folder_reference(url: str) -> None:
     with pytest.raises(ValueError):
-        PublicReference.from_folder(url)
+        DriveReference.from_folder(url)
 
 
 def test_anon_builds_no_api_client() -> None:
@@ -575,7 +576,9 @@ def test_unrecognized_listing_link_is_not_silently_dropped(
 
 def test_reconnection_updates_effective_access() -> None:
     fs = make_api_fs()
-    fs.root_file_id = "public-root"
+    fs.root_file_id = (
+        "https://drive.google.com/drive/folders/public-root?resourcekey=key"
+    )
     fs.dircache[""] = [{"id": "private", "name": "private", "type": "file", "size": 1}]
     try:
         fs.connect("anon")
@@ -585,6 +588,9 @@ def test_reconnection_updates_effective_access() -> None:
             fs.connect("cache")
         assert fs.access == "full_control"
         assert fs._public is None
+        fs.connect("anon")
+        assert fs.root_file_id == "public-root"
+        assert client(fs)._references["public-root"].resource_key == "key"
     finally:
         fs.close()
 

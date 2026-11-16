@@ -21,7 +21,7 @@ from google.oauth2 import service_account
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload, build_http
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload, build_http
 from typing_extensions import TypedDict
 
 from ._constants import (
@@ -50,8 +50,9 @@ from ._constants import (
     _normalize_path,
 )
 from ._file import GoogleDriveFile
-from ._public import PublicDriveClient, PublicReference
+from ._public import PublicDriveClient
 from ._read import ReadSnapshot, ReadSource
+from ._reference import DriveReference
 from .types import FileInfo
 from .typing_utils import override
 from .utils import escape_query_str, merge_fields
@@ -135,8 +136,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         """Initialize a Google Drive file system.
 
         Args:
-            root_file_id: Folder file ID to use as the filesystem root (the empty
-                path ``""``). Obtain it from a folder URL such as
+            root_file_id: Folder ID or folder URL to use as the filesystem root
+                (the empty path ``""``), such as
                 ``https://drive.google.com/drive/folders/<id>``. If omitted,
                 defaults to the shared-drive root when ``drive`` is set, otherwise
                 ``"root"`` (the authenticated user's My Drive). A shared-drive ID
@@ -205,7 +206,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.root_file_id = root_file_id or ROOT_ID
         self._api: _DriveConnection | None = None
         self._public: PublicDriveClient | None = None
-        self._public_root: PublicReference | None = None
+        self._root_reference: DriveReference | None = None
         self._changes_sync_interval = changes_sync_interval
         self._changes_page_token: str | None = None
         self._last_sync_monotonic: float | None = None
@@ -214,8 +215,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             if drive:
                 self.drive = self._resolve_drive_id(drive)
             if root_file_id and root_file_id != ROOT_ID:
-                self._validate_root_file_id(root_file_id)
-            self.root_file_id = root_file_id or self.drive or ROOT_ID
+                self._validate_root_file_id(self.root_file_id)
+            self.root_file_id = (
+                self.root_file_id if root_file_id else self.drive or ROOT_ID
+            )
 
         if self._changes_sync_interval is not None:
             # Baseline the changes token eagerly so the first cached read can already reconcile.
@@ -230,11 +233,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     def _validate_root_file_id(self, root_file_id: str) -> None:
         try:
-            meta = self.files.get(
+            request = self.files.get(
                 fileId=root_file_id,
                 fields="id,trashed,mimeType,driveId",
                 supportsAllDrives=True,
-            ).execute(num_retries=_NUM_RETRIES)
+            )
+            self._set_root_resource_key(request, root_file_id)
+            meta = request.execute(num_retries=_NUM_RETRIES)
         except HttpError as err:
             if err.status_code != 404:
                 raise
@@ -310,7 +315,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self._require_authenticated().http = value
 
     def connect(self, method: AuthMethod | None = None) -> None:
-        root: PublicReference | None = None
+        root = self._root_reference
+        if self.root_file_id == ROOT_ID:
+            root = None
+        elif root is None or root.id != self.root_file_id:
+            root = DriveReference.from_folder(self.root_file_id)
         public: PublicDriveClient | None = None
         api: _DriveConnection | None = None
         if method == "anon":
@@ -320,14 +329,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 )
             if self._changes_sync_interval is not None:
                 raise ValueError("Changes sync is not supported for anonymous access")
-            if self.root_file_id == ROOT_ID:
+            if root is None:
                 raise ValueError(
                     "Anonymous access requires root_file_id set to a public folder URL or ID"
                 )
-            root = PublicReference.from_folder(self.root_file_id)
-            previous_root = self._public_root
-            if previous_root is not None and previous_root.id == root.id:
-                root = previous_root
             public = PublicDriveClient(root)
         else:
             if method == "browser":
@@ -350,9 +355,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self._auth_method = method
         self._is_anonymous = method == "anon"
         self.access = "read_only" if self._is_anonymous else self._requested_access
+        self._root_reference = root
         if root is not None:
             self.root_file_id = root.id
-            self._public_root = root
         self.invalidate_cache()
         for name in ("drives", "export_formats", "_resolved_root_id"):
             self.__dict__.pop(name, None)
@@ -1584,6 +1589,15 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             return self.drive
         return file_id
 
+    def _set_root_resource_key(self, request: HttpRequest, file_id: str) -> None:
+        root = self._root_reference
+        if root is not None and root.id == file_id and root.resource_key:
+            if request.headers is None:
+                request.headers = {}
+            request.headers["X-Goog-Drive-Resource-Keys"] = (
+                f"{root.id}/{root.resource_key}"
+            )
+
     def _get_file(
         self, file_id: str, *, fields: str | None = None, **kwargs: Any
     ) -> File:
@@ -1600,12 +1614,14 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         """
         for reserved in ("fileId", "fields", "supportsAllDrives"):
             kwargs.pop(reserved, None)
-        return self.files.get(
+        request = self.files.get(
             fileId=file_id,
             fields=merge_fields(INFO_FIELDS, fields),
             supportsAllDrives=True,
             **kwargs,
-        ).execute(num_retries=_NUM_RETRIES)
+        )
+        self._set_root_resource_key(request, file_id)
+        return request.execute(num_retries=_NUM_RETRIES)
 
     def _list_children(
         self,
@@ -1644,7 +1660,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             if page_token:
                 page_kwargs["pageToken"] = page_token
 
-            response = self.files.list(
+            request = self.files.list(
                 q=query,
                 spaces=self.spaces,
                 fields=all_fields,
@@ -1652,7 +1668,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 pageSize=1000,
                 **page_kwargs,
                 **kwargs,
-            ).execute(num_retries=_NUM_RETRIES)
+            )
+            self._set_root_resource_key(request, file_id)
+            response = request.execute(num_retries=_NUM_RETRIES)
             for file in response.get("files", []):
                 all_files.append(_finfo_from_response(file, path_prefix))
             page_token = response.get("nextPageToken", None)
@@ -1709,14 +1727,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             if page_token:
                 page_kwargs["pageToken"] = page_token
 
-            response = self.files.list(
+            request = self.files.list(
                 q=query,
                 spaces=self.spaces,
                 fields=f"nextPageToken, files({INFO_FIELDS})",
                 pageSize=_FIND_CHILD_PAGE_SIZE,
                 **page_kwargs,
                 **self._drive_kw(),
-            ).execute(num_retries=_NUM_RETRIES)
+            )
+            self._set_root_resource_key(request, parent_id)
+            response = request.execute(num_retries=_NUM_RETRIES)
             matches.extend(
                 file for file in response.get("files", []) if file["name"] == name
             )

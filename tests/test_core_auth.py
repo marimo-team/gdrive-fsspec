@@ -5,10 +5,11 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from conftest import make_api_fs
+from conftest import MockedDriveFS, make_api_fs
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec._constants import ROOT_ID
+from gdrive_fsspec._constants import ROOT_ID, AuthMethod
+from gdrive_fsspec._reference import DriveReference
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
 
@@ -108,21 +109,83 @@ def test_init_resolves_drive_for_non_anon() -> None:
     assert fs.drive == "resolved-id"
 
 
-def test_init_validates_root_file_id() -> None:
-    target = "gdrive_fsspec.core.service_account.Credentials.from_service_account_info"
+@pytest.mark.parametrize("token", ["browser", "cache", "service_account"])
+@pytest.mark.parametrize(
+    "root",
+    [
+        "folder-id",
+        "https://drive.google.com/drive/folders/folder-id?usp=sharing",
+        "https://drive.google.com/drive/folders/folder-id?resourcekey=key",
+        "https://drive.google.com/drive/u/0/folders/folder-id",
+        "https://drive.google.com/folderview?id=folder-id",
+    ],
+)
+def test_init_validates_normalized_root(token: AuthMethod, root: str) -> None:
     with (
-        mock.patch(target, return_value=mock.Mock()),
+        mock.patch.object(GoogleDriveFileSystem, "_connect_browser"),
+        mock.patch.object(GoogleDriveFileSystem, "_connect_cache"),
+        mock.patch.object(GoogleDriveFileSystem, "_connect_service_account"),
         mock.patch("gdrive_fsspec.core.build"),
         mock.patch.object(GoogleDriveFileSystem, "_validate_root_file_id") as validate,
     ):
-        GoogleDriveFileSystem(
-            token="service_account",
-            creds={"type": "service_account"},
-            root_file_id="folder-id",
+        fs = GoogleDriveFileSystem(
+            token=token,
+            root_file_id=root,
             skip_instance_cache=True,
         )
 
     validate.assert_called_once_with("folder-id")
+    assert fs.root_file_id == "folder-id"
+    assert fs._root_reference == DriveReference(
+        "folder-id", "key" if "resourcekey" in root else None
+    )
+
+
+@pytest.mark.parametrize("method", ["validate", "get", "list", "find"])
+@pytest.mark.parametrize("folder_id", ["folder-id", "other-folder"])
+def test_root_resource_key_is_scoped_to_root_requests(
+    mocked_fs: MockedDriveFS, method: str, folder_id: str
+) -> None:
+    fs, files, _, _ = mocked_fs
+    fs._root_reference = DriveReference("folder-id", "key")
+    request = (
+        files.list.return_value
+        if method in {"list", "find"}
+        else files.get.return_value
+    )
+    request.headers = {"Accept": "application/json"}
+    request.execute.return_value = {
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if method == "validate":
+        fs._validate_root_file_id(folder_id)
+    elif method == "get":
+        fs._get_file(folder_id)
+    elif method == "list":
+        fs._list_children(folder_id)
+    else:
+        fs._find_child_by_name(folder_id, "file")
+    expected = {"Accept": "application/json"}
+    if folder_id == "folder-id":
+        expected["X-Goog-Drive-Resource-Keys"] = "folder-id/key"
+    assert request.headers == expected
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        "https://example.com/drive/folders/folder-id",
+        "http://drive.google.com/drive/folders/folder-id",
+        "https://drive.google.com/file/d/file-id/view",
+    ],
+)
+def test_invalid_folder_url_fails_before_authentication(root: str) -> None:
+    with (
+        mock.patch.object(GoogleDriveFileSystem, "_connect_cache") as connect,
+        pytest.raises(ValueError, match="folder"),
+    ):
+        GoogleDriveFileSystem(root_file_id=root, skip_instance_cache=True)
+    connect.assert_not_called()
 
 
 def test_init_skips_validation_for_default_root() -> None:

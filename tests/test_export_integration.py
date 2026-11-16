@@ -9,7 +9,8 @@ import pytest
 from export_validation import configured_export_setting, validate_export
 
 from gdrive_fsspec import GoogleDriveFileSystem
-from gdrive_fsspec._public import _DOCUMENT_TYPES, PublicDriveClient, PublicReference
+from gdrive_fsspec._public import _DOCUMENT_TYPES, PublicDriveClient
+from gdrive_fsspec._reference import DriveReference
 
 pytestmark = pytest.mark.drive_exports
 
@@ -24,7 +25,7 @@ pytestmark = pytest.mark.drive_exports
 )
 def test_public_export_content(kind: str, source_mime: str, target_mime: str) -> None:
     file_id = configured_export_setting(f"GDRIVE_FSSPEC_PUBLIC_{kind.upper()}")
-    client = PublicDriveClient(PublicReference(file_id))
+    client = PublicDriveClient(DriveReference(file_id))
     try:
         data = client.export(file_id, source_mime, target_mime)
     finally:
