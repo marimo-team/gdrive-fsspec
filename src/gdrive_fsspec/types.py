@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from typing_extensions import TypedDict
 
@@ -11,7 +11,7 @@ class _FsspecRequired(TypedDict):
     """Fields fsspec requires on every file-info dict."""
 
     name: str
-    size: int
+    size: int | None
     type: Literal["file", "directory"]
 
 
@@ -34,7 +34,7 @@ class _DrivePartialFields(TypedDict, total=False):
     capabilities: _Capabilities
 
 
-class FileInfo(_FsspecRequired, _DrivePartialFields, extra_items=Any):
+class FileInfo(_FsspecRequired, _DrivePartialFields, extra_items=object):
     """Normalized file info with a required Drive ID and optional API metadata."""
 
     id: str
